@@ -1,6 +1,8 @@
 (ns bitcoin.node.peer-pool-test
   (:require [bitcoin.node.peer :as peer]
             [bitcoin.node.peer-pool :as pool]
+            [bitcoin.consensus.storage :as storage]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]])
   (:import [java.net InetAddress]
            [java.nio.file Files Path]
@@ -9,6 +11,8 @@
 (defn- ipv4 [a b c d]
   (InetAddress/getByAddress
    (byte-array (map unchecked-byte [a b c d]))))
+
+(def selection-key (vec (repeat pool/selection-key-bytes 0)))
 
 (deftest dns-discovery-is-bounded-deduplicated-and-public-only
   (let [resolved
@@ -48,7 +52,8 @@
         (pool/create
          [{:host "a" :network :regtest}
           {:host "b" :network :regtest}
-          {:host "c" :network :regtest}])
+          {:host "c" :network :regtest}]
+         {:selection-key selection-key})
         first-two (pool/candidates initial 100 2)
         selected (pool/mark-selected initial first-two 100)
         next-peer (first (pool/candidates selected 101 1))
@@ -56,11 +61,12 @@
         (pool/record-failure
          selected next-peer 101 :bitcoin.node/peer-timeout 500)
         eligible (pool/candidates failed 102 3)]
-    (is (= ["a" "b"] (mapv :host first-two)))
-    (is (= "c" (:host next-peer)))
-    (is (= ["a" "b"] (mapv :host eligible)))
+    (is (= 2 (count (set (map :host first-two)))))
+    (is (not (contains? (set (map :host first-two)) (:host next-peer))))
+    (is (= (set (map :host first-two)) (set (map :host eligible))))
     (is (= {:peers 3 :eligible 2 :cooling-down 1
-            :successful 0 :next-retry-at 30101}
+            :successful 0 :anchors 0 :eligible-network-groups 2
+            :next-retry-at 30101}
            (pool/status failed 102)))
     (let [healthy
           (pool/record-success failed (first eligible) 103 40)]
@@ -70,6 +76,34 @@
       (is (= 40.0 (get-in healthy
                           [:peers (pool/peer-id (first eligible))
                            :latency-ema-ms]))))))
+
+(deftest selection-prefers-network-diversity-and-operator-anchors
+  (let [configurations
+        [{:host "8.8.1.1" :network :mainnet}
+         {:host "8.8.2.2" :network :mainnet}
+         {:host "1.1.1.1" :network :mainnet}
+         {:host "9.9.9.9" :network :mainnet}]
+        initial (pool/create configurations {:selection-key selection-key})
+        diverse (pool/candidates initial 1 3)
+        promoted
+        (pool/add-peers
+         (pool/record-success initial (first configurations) 1 25 1)
+         [{:host "9.9.9.9" :network :mainnet
+           :anchor? true :source :operator
+           :required-services peer/node-network-service}])
+        anchored (pool/candidates promoted 2 1)]
+    (is (= [:ipv4 8 8] (pool/network-group (first configurations))))
+    (is (= 3 (count (set (map pool/network-group diverse)))))
+    (is (= #{"1.1.1.1" "9.9.9.9"}
+           (set (remove #(str/starts-with? % "8.8.")
+                        (map :host diverse)))))
+    (is (= "9.9.9.9" (:host (first anchored))))
+    (is (= peer/node-network-service
+           (:required-services (first anchored))))
+    (is (= 1 (:anchors (pool/status promoted 2))))
+    (is (= 1 (get-in promoted
+                     [:peers (pool/peer-id (first configurations))
+                      :successes])))))
 
 (deftest repeated-failures-use-bounded-exponential-backoff
   (let [configuration {:host "a" :network :regtest}
@@ -93,6 +127,24 @@
     (is (= (+ 3000 pool/maximum-cooldown-ms)
            (get-in severe [:peers (pool/peer-id configuration)
                            :cooldown-until])))))
+
+(deftest peer-service-masks-cover-exactly-the-wire-uint64-domain
+  (is (= peer/maximum-service-mask
+         (get-in
+          (pool/create
+           [{:host "8.8.8.8" :network :mainnet
+             :required-services peer/maximum-service-mask}])
+          [:peers [:mainnet "8.8.8.8" 8333]
+           :configuration :required-services])))
+  (is (= :bitcoin.node/peer-configuration
+         (:type
+          (ex-data
+           (try
+             (pool/create
+              [{:host "8.8.8.8" :network :mainnet
+                :required-services
+                (inc peer/maximum-service-mask)}])
+             (catch clojure.lang.ExceptionInfo error error)))))))
 
 (deftest peer-pool-snapshot-is-checksummed-bounded-and-atomic
   (let [directory
@@ -129,6 +181,20 @@
         (Files/deleteIfExists path)
         (Files/deleteIfExists directory)))))
 
+(deftest legacy-peer-pool-gains-a-bounded-selection-key
+  (let [current
+        (pool/create
+         [{:host "8.8.8.8" :network :mainnet}]
+         {:selection-key selection-key})
+        legacy-bytes
+        (storage/encode-value
+         {:format pool/legacy-pool-format
+          :pool (dissoc current :selection-key :selection-counter)})
+        migrated (pool/decode legacy-bytes)]
+    (is (= pool/selection-key-bytes (count (:selection-key migrated))))
+    (is (= 0 (:selection-counter migrated)))
+    (is (= (:peers current) (:peers migrated)))))
+
 (deftest managed-sync-updates-health-from-typed-peer-evidence
   (let [pool-atom
         (atom
@@ -138,13 +204,13 @@
     (with-redefs
      [peer/sync-headers-from-peers!
       (fn [configurations _ _ options]
-        (is (= ["bad" "good"] (mapv :host configurations)))
+        (is (= #{"bad" "good"} (set (map :host configurations))))
         (is (= {:max-batches 2} options))
         {:status :synced
          :successful-peers 1
          :observations
          [{:peer {:host "good" :port 18444 :network :regtest}
-           :elapsed-ms 25.0}]
+           :elapsed-ms 25.0 :services 1}]
          :failures
          [{:peer {:host "bad" :port 18444 :network :regtest}
            :type :bitcoin.node/peer-timeout :elapsed-ms 500.0}]})]
@@ -154,6 +220,9 @@
             {:now-ms 1000 :maximum-peers 2 :max-batches 2})]
        (is (= :synced (:status result)))
        (is (= 1 (get-in result [:pool :successful])))
+       (is (= 1 (get-in @pool-atom
+                        [:peers [:regtest "good" 18444]
+                         :last-services])))
        (is (= ["good"]
               (mapv :host (pool/candidates @pool-atom 1001 2))))))))
 

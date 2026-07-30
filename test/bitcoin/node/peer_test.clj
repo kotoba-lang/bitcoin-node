@@ -151,6 +151,51 @@
                  (catch clojure.lang.ExceptionInfo error error))))))
       @served)))
 
+(deftest peer-must-advertise-required-service-bits
+  (letfn [(connect-to [advertised-services required-services]
+            (with-open [server (ServerSocket. 0)]
+              (let [magic
+                    (get-in peer/network-configuration [:regtest :magic])
+                    served
+                    (future
+                      (with-open
+                       [^Socket socket (.accept server)
+                        input (DataInputStream. (.getInputStream socket))
+                        output (DataOutputStream. (.getOutputStream socket))]
+                        (is (= "version" (:command (read-message input))))
+                        (send-message!
+                         output magic "version"
+                         (protocol/encode-version-payload
+                          {:services advertised-services
+                           :timestamp 1 :nonce 2}))
+                        (send-message! output magic "verack" [])
+                        (is (= "verack" (:command (read-message input))))))
+                    result
+                    (try
+                      (peer/connect!
+                       {:host "127.0.0.1"
+                        :port (.getLocalPort server)
+                        :network :regtest
+                        :timeout-ms 5000
+                        :required-services required-services})
+                      (catch clojure.lang.ExceptionInfo error error))]
+                @served
+                result)))]
+    (let [failure (connect-to 0 peer/node-network-service)]
+      (is (= :bitcoin.node/peer-required-services
+             (:type (ex-data failure))))
+      (is (= peer/node-network-service
+             (:required (ex-data failure))))
+      (is (= 0 (:actual (ex-data failure)))))
+    (let [connection
+          (connect-to peer/node-network-service
+                      peer/node-network-service)]
+      (try
+        (is (= peer/node-network-service
+               (get-in connection [:peer-version :services])))
+        (finally
+          (peer/close! connection))))))
+
 (deftest control-traffic-cannot-extend-an-overall-request-deadline
   (with-open [server (ServerSocket. 0)]
     (let [magic (get-in peer/network-configuration [:regtest :magic])

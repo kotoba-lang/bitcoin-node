@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.17.0 — 2026-07-30
+
+- Select eligible peers across distinct public IPv4 /16 groups before reusing
+  a group, and expose eligible group and operator-anchor counts.
+- Replace predictable host ordering with a cryptographically salted,
+  counter-rotated rank that survives checksummed atomic pool snapshots.
+- Migrate v1 peer pools to the v2 selection format without trusting persisted
+  reputation as consensus input.
+- Support explicit operator anchors while retaining cooldown and local
+  validation, and require configured P2P service bits after version handshake.
+- Persist observed peer service masks and quarantine peers that fail required
+  service negotiation.
+
 ## 0.16.0 — 2026-07-30
 
 - Move validated side-branch block bodies out of checksummed EDN host metadata

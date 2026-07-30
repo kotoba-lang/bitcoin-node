@@ -24,6 +24,9 @@
   (close [_] (.close socket)))
 
 (def minimum-peer-version 31800)
+(def node-network-service 1)
+(def node-network-limited-service 1024)
+(def maximum-service-mask 18446744073709551615N)
 (def witness-block-inventory-type 0x40000002)
 
 (defn- fail! [type message data]
@@ -119,10 +122,13 @@
   "Connect and complete mutual version/verack.
 
   Options: `:host`, `:port`, `:network`, `:timeout-ms`, `:start-height`,
-  and `:user-agent`. The returned connection must be closed with `close!`."
-  [{:keys [host port network timeout-ms start-height user-agent]
+  `:user-agent`, and an optional `:required-services` bit mask. The returned
+  connection must be closed with `close!`."
+  [{:keys [host port network timeout-ms start-height user-agent
+           required-services]
     :or {host "127.0.0.1" network :mainnet timeout-ms 10000
-         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.9.0/"}}]
+         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.9.0/"
+         required-services 0}}]
   (let [base-config (get network-configuration network)]
     (when-not base-config
       (fail! :bitcoin.node/peer-network
@@ -130,10 +136,13 @@
     (let [{:keys [magic port]}
           (assoc base-config :port (or port (:port base-config)))]
     (when-not (and (integer? timeout-ms) (pos? timeout-ms)
-                   (<= timeout-ms Integer/MAX_VALUE))
+                   (<= timeout-ms Integer/MAX_VALUE)
+                   (integer? required-services)
+                   (<= 0 required-services maximum-service-mask))
       (fail! :bitcoin.node/peer-configuration
-             "Peer timeout must be a positive integer."
-             {:timeout-ms timeout-ms}))
+             "Peer timeout or required service mask is invalid."
+             {:timeout-ms timeout-ms
+              :required-services required-services}))
     (let [socket (Socket.)]
       (try
         (.connect socket (InetSocketAddress. ^String host (int port))
@@ -161,6 +170,15 @@
                          "Bitcoin peer does not support getheaders."
                          {:minimum minimum-peer-version
                           :actual (:version peer-version)}))
+                (when-not
+                 (= (biginteger required-services)
+                    (.and (biginteger required-services)
+                          (biginteger (:services peer-version))))
+                  (fail!
+                   :bitcoin.node/peer-required-services
+                   "Bitcoin peer lacks required advertised services."
+                   {:required required-services
+                    :actual (:services peer-version)}))
                 (assoc base :peer-version peer-version))
               (let [message
                     (read-message-until!
@@ -385,6 +403,8 @@
                           :batches (:batches result)
                           :accepted (:accepted result)
                           :elapsed-ms (elapsed-ms)
+                          :services
+                          (get-in connection [:peer-version :services])
                           :reported-tip
                           (when tip (protocol/natural-hash->hex tip))}})
                       (finally

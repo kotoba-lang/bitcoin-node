@@ -67,13 +67,17 @@ hash before the raw block is returned to the full consensus validator.
 
 `bitcoin.node.peer-pool` bootstraps bounded public IPv4 candidates from the
 Bitcoin Core DNS seed set, then rotates peers using local success, failure,
-latency, and exponential-cooldown history. DNS is discovery only: every peer
-must still complete the authenticated network handshake and all downloaded
-data crosses the same local consensus boundary. Pool snapshots are bounded,
-checksummed, and atomically replaced so health history survives process
-restarts without becoming consensus input. Only globally routed IPv4 unicast
-answers are accepted; local, CGNAT, documentation, benchmark, multicast, and
-reserved ranges are excluded.
+latency, exponential-cooldown history, distinct IPv4 /16 network groups, and a
+persisted salted rotation counter. DNS is discovery only: every peer must still
+complete the network-bound handshake and all downloaded data crosses
+the same local consensus boundary. Pool snapshots are bounded, checksummed,
+and atomically replaced so health and unpredictable selection history survive
+process restarts without becoming consensus input. Only globally routed IPv4
+unicast answers are accepted; local, CGNAT, documentation, benchmark,
+multicast, and reserved ranges are excluded. Explicit operator anchors can be
+prioritized as reconnect candidates and peer service bits can be required, but
+neither bypasses local proof-of-work, fork-choice, header, block, or Script
+validation.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
@@ -184,13 +188,20 @@ Direct header synchronization:
 Managed discovery, failover, and durable peer health:
 
 ```clojure
-(require '[bitcoin.node.peer-pool :as peer-pool])
+(require '[bitcoin.node.peer :as peer]
+         '[bitcoin.node.peer-pool :as peer-pool])
 
 (def peers
   (atom
-   (peer-pool/create
-    (peer-pool/discover-dns!
-     :mainnet {:timeout-ms 5000 :maximum-results 64}))))
+   (-> (peer-pool/create
+        (peer-pool/discover-dns!
+         :mainnet {:timeout-ms 5000 :maximum-results 64}))
+       (peer-pool/add-peers
+        [{:host "operator-node.example"
+          :network :mainnet
+          :anchor? true
+          :source :operator
+          :required-services peer/node-network-service}]))))
 
 (disk-consensus/sync-headers-managed!
  durable peers unix-time
