@@ -112,7 +112,7 @@
     (is (consensus/ready? node))
     (is (= 0 (:height before)))
     (is (= 1 (:height after)))
-    (is (= 2 (:utxo-count after)))
+    (is (= 1 (:utxo-count after)))
     (is (:fully-validated? after))
     (is (false? (:persistent? after)))))
 

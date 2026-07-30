@@ -14,7 +14,8 @@
             [bitcoin.consensus.utxo :as utxo]
             [kotobase.bitcoin.protocol :as header]))
 
-(defrecord DiskConsensusNode [state backend verify-script network])
+(defrecord DiskConsensusNode
+  [state backend verify-script network background])
 
 (def ^:private disk-coins-key ::disk-backed)
 
@@ -123,7 +124,7 @@
           (storage/encode durable)))))
     @result))
 
-(defn open
+(defn- open-single
   "Open or initialize an atomic disk-backed consensus node.
 
   `genesis-bytes` is required only for a new database. A non-empty legacy UTXO
@@ -172,13 +173,58 @@
                  "A populated UTXO database lacks atomic consensus metadata."
                  {:network network :height (:height durable)
                   :tip (:tip durable)}))]
-    (->DiskConsensusNode (atom initial) backend verify-script network)))
+    (->DiskConsensusNode
+     (atom initial) backend verify-script network nil)))
+
+(defn- header-genesis-bytes [header-state]
+  (when header-state
+    (some-> (get-in header-state
+                    [:nodes (:active-tip header-state) :block])
+            block/serialize)))
+
+(defn open
+  "Open an atomic disk consensus node.
+
+  Snapshot nodes automatically maintain an independent genesis-started
+  background database at `<path>.background`. Custom DataSources must provide
+  `:background-datasource` or `:background-path`."
+  [{:keys [path network genesis-bytes verify-script
+           busy-timeout-ms header-state
+           background-path background-datasource
+           background-genesis-bytes]
+    :as options}]
+  (let [node (open-single options)
+        assumed? (= :assumed (get-in @(:state node) [:snapshot :status]))]
+    (if-not assumed?
+      node
+      (let [derived-path (or background-path
+                             (when path (str path ".background")))
+            _ (when-not (or derived-path background-datasource)
+                (fail!
+                 :bitcoin.node/missing-background-storage
+                 "Snapshot consensus requires independent background storage."
+                 {:network network}))
+            background
+            (open-single
+             {:path derived-path
+              :datasource background-datasource
+              :network network
+              :genesis-bytes
+              (or background-genesis-bytes genesis-bytes
+                  (header-genesis-bytes header-state))
+              :verify-script verify-script
+              :busy-timeout-ms (or busy-timeout-ms 5000)})]
+        (assoc node :background background)))))
 
 (defn consensus-status [node]
   (let [state @(:state node)
         durable (sqlite/status (:backend node))
         tip (:active-tip state)
-        best (:best-header state)]
+        best (:best-header state)
+        assumed? (= :assumed (get-in state [:snapshot :status]))
+        background-status
+        (when (and assumed? (:background node))
+          (sqlite/status (get-in node [:background :backend])))]
     {:status :connected
      :backend :sqlite-consensus
      :network (:network state)
@@ -192,6 +238,10 @@
      (and (not= :assumed (get-in state [:snapshot :status]))
           (true? (get-in state [:nodes tip :block-valid?])))
      :snapshot-status (get-in state [:snapshot :status])
+     :snapshot-base-height (get-in state [:snapshot :base-height])
+     :snapshot-base-block (get-in state [:snapshot :base-blockhash])
+     :background-height (:height background-status)
+     :background-tip (:tip background-status)
      :persistent? true}))
 
 (defn ready? [node]
@@ -245,6 +295,80 @@
      :height (:height node)
      :previous-height (dec (:height node))
      :undo (:undo node)}))
+
+(declare accept-block!)
+
+(defn- promote-background!
+  [node]
+  (let [state @(:state node)
+        snapshot (:snapshot state)
+        background (:background node)
+        background-status (sqlite/status (:backend background))
+        base-height (:base-height snapshot)]
+    (if (not= base-height (:height background-status))
+      state
+      (let [_ (sqlite/integrity-check! (:backend background))
+            commitment (sqlite/hash-serialized (:backend background))
+            validated
+            (assumeutxo/validate-background-commitment
+             state (:height background-status) (:tip background-status)
+             commitment)
+            base (:base-blockhash snapshot)
+            foreground-status (sqlite/status (:backend node))
+            promoted
+            (-> validated
+                (assoc-in [:nodes base :block-valid?] true)
+                (assoc-in [:nodes base :scripts-checked?] true)
+                (strip-active-data (:coin-count foreground-status)))]
+        (sqlite/save-host-state!
+         (:backend node) (:tip foreground-status)
+         (:height foreground-status) (storage/encode promoted))
+        (reset! (:state node) promoted)
+        promoted))))
+
+(defn accept-background-block!
+  "Fully validate one pre-snapshot block in the independent disk chainstate.
+  At the exact snapshot base, stream its UTXO commitment and atomically promote
+  the foreground trust state when height, tip, and commitment all match."
+  [node raw-block now]
+  (locking node
+    (when-not (= :assumed (get-in @(:state node) [:snapshot :status]))
+      (fail! :bitcoin.node/no-background-validation
+             "No assumed snapshot is awaiting background validation." {}))
+    (when-not (:background node)
+      (fail! :bitcoin.node/missing-background-storage
+             "Assumed snapshot has no independent background chainstate." {}))
+    (let [base-height (get-in @(:state node) [:snapshot :base-height])
+          before-height
+          (:height (sqlite/status (get-in node [:background :backend])))]
+      (when (>= before-height base-height)
+        (fail! :bitcoin.node/background-complete
+               "Background chainstate already reached the snapshot base."
+               {:height before-height :base-height base-height}))
+      (accept-block! (:background node) raw-block now)
+      (promote-background! node)
+      (consensus-status node))))
+
+(defn verify-background!
+  "Retry integrity and commitment verification after the background database
+  has reached the snapshot base. This never advances either chainstate."
+  [node]
+  (locking node
+    (when-not (= :assumed (get-in @(:state node) [:snapshot :status]))
+      (fail! :bitcoin.node/no-background-validation
+             "No assumed snapshot is awaiting background validation." {}))
+    (when-not (:background node)
+      (fail! :bitcoin.node/missing-background-storage
+             "Assumed snapshot has no independent background chainstate." {}))
+    (let [base-height (get-in @(:state node) [:snapshot :base-height])
+          actual-height
+          (:height (sqlite/status (get-in node [:background :backend])))]
+      (when-not (= base-height actual-height)
+        (fail! :bitcoin.node/background-incomplete
+               "Background chainstate has not reached the snapshot base."
+               {:height actual-height :base-height base-height}))
+      (promote-background! node)
+      (consensus-status node))))
 
 (defn accept-block!
   "Validate one raw block and atomically publish its fork-choice, UTXO delta,

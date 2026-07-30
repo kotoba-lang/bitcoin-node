@@ -41,6 +41,27 @@
   (when (pos? height)
     (header/natural-hash->hex (get-in parsed [:header :prev-block]))))
 
+(defn- connect-genesis! [host parsed]
+  (let [initialized
+        (chainstate/initialize
+         (:network host) parsed (:verify-script host))
+        hash (:active-tip initialized)
+        node (get-in initialized [:nodes hash])
+        view (sqlite/begin (:backend host))]
+    (try
+      (assoc
+       (sqlite/commit-transition!
+        view
+        {:expected-tip nil :expected-height -1
+         :new-tip hash :new-height 0 :detach []
+         :attach [{:block-hash hash :parent-hash nil
+                   :height 0 :previous-height -1
+                   :undo (:undo node)}]})
+       :backend :sqlite-utxo)
+      (catch Throwable error
+        (sqlite/rollback! view)
+        (throw error)))))
+
 (defn connect-block!
   "Validate and atomically connect one raw block to the durable active tip.
 
@@ -82,13 +103,15 @@
            :sigop-cost-fn
            #(script/transaction-sigop-cost %1 %2 flags)}
           (select-keys options [:parent-mtp :coin-mtp]))]
-     (assoc
-      (sqlite/connect-block!
-       (:backend host) parsed
-       {:block-hash block-hash :parent-hash parent
-        :height height :previous-height (:height before)}
-       verifier transition-options)
-      :backend :sqlite-utxo))))
+     (if (zero? height)
+       (connect-genesis! host parsed)
+       (assoc
+        (sqlite/connect-block!
+         (:backend host) parsed
+         {:block-hash block-hash :parent-hash parent
+          :height height :previous-height (:height before)}
+         verifier transition-options)
+        :backend :sqlite-utxo)))))
 
 (defn disconnect-tip!
   ([host] (disconnect-tip! host (:tip (sqlite/status (:backend host)))))

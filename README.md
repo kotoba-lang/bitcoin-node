@@ -138,7 +138,17 @@ For snapshot-start, pass an authenticated Core v2 snapshot as
 chainstate as `:header-state`. The snapshot base must be on its most-work
 header chain. UTXOs, `:assumed` trust status, active tip, and headers are
 committed together; `ready?` remains false across restart until independent
-background validation reproduces the pinned UTXO commitment.
+background validation reproduces the pinned UTXO commitment. The disk host
+creates `<path>.background` from genesis and advances it with
+`disk-consensus/accept-background-block!`. At the exact snapshot base it checks
+SQLite integrity, streams Core HASH_SERIALIZED without loading the UTXO set,
+and atomically changes the foreground trust state to `:validated`.
+
+If promotion verification is interrupted after the background block commit,
+`disk-consensus/verify-background!` safely retries without advancing either
+chain. Status reports `:background-height`, `:background-tip`, and the pinned
+snapshot base. A custom foreground DataSource must also provide an independent
+`:background-datasource` or `:background-path`.
 
 An AssumeUTXO state reports `:snapshot-status :assumed` until background
 validation reaches the exact base and recomputes the pinned UTXO commitment.
@@ -177,3 +187,8 @@ the disk consensus host, and reopens the database at a configurable interval.
 If a pruned node no longer has the requested post-snapshot range it fails
 before importing state. `CONSENSUS_GENESIS_HEX` is needed only when Core has
 also pruned the genesis block and no header checkpoint exists.
+
+On an archival Core, set `CONSENSUS_BACKGROUND_VALIDATE=true` to replay blocks
+1 through the snapshot base into the independent disk chainstate, reopen it at
+the configured interval, recompute the base commitment, and require the final
+foreground state to report `snapshot=validated` and `ready=true`.

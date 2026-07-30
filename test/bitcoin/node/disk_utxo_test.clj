@@ -22,17 +22,17 @@
   (with-store
     (fn [path]
       (let [host (disk/open {:path path :network :mainnet})]
-        (is (= 1
+        (is (= 0
                (:coin-count
                 (disk/connect-block! host (fixture/hex->bytes fixture/genesis)))))
-        (is (= 2
+        (is (= 1
                (:coin-count
                 (disk/connect-block! host
                                      (fixture/hex->bytes fixture/block-one)))))
         (let [reopened (disk/open {:path path :network :mainnet})]
           (is (= 1 (:height (disk/status reopened))))
           (is (= :ok (:integrity (disk/integrity-check! reopened))))
-          (is (= 1 (:coin-count (disk/disconnect-tip! reopened))))
+          (is (= 0 (:coin-count (disk/disconnect-tip! reopened))))
           (is (= 0 (:height (disk/status reopened)))))))))
 
 (deftest unsupported-network-fails-before-creating-storage

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.0 — 2026-07-30
+
+- Maintain a separate genesis-started SQLite consensus database for every
+  assumed snapshot.
+- Resume full background block validation across process restarts and expose
+  its durable height/tip.
+- At the exact snapshot base, stream the background UTXO commitment in constant
+  memory, require matching height/tip/commitment, and atomically promote the
+  foreground snapshot to `:validated`.
+- Retain fail-closed behavior when background storage is absent or mismatched.
+- Match Core genesis semantics in both integrated and lower-level disk hosts:
+  genesis is validated/indexed but its coinbase never enters the UTXO set.
+
 ## 0.8.2 — 2026-07-30
 
 - Add a resumable Core-backed snapshot historical harness covering full header

@@ -18,6 +18,7 @@ header_state="${CONSENSUS_HEADER_CHAINSTATE:-}"
 database="${CONSENSUS_DISK_CHAINSTATE:-}"
 end_height="${CONSENSUS_HISTORY_END:-}"
 restart_interval="${CONSENSUS_RESTART_INTERVAL:-1000}"
+background_validate="${CONSENSUS_BACKGROUND_VALIDATE:-false}"
 genesis_hex="${CONSENSUS_GENESIS_HEX:-}"
 
 if [[ -z "$datadir" || -z "$snapshot_path" || -z "$snapshot_height" ||
@@ -260,3 +261,61 @@ fi
                 " tip=" (:best-block status)
                 " snapshot=" (name (:snapshot-status status))))))
       (finally (.close snapshot))))'
+
+if [[ "$background_validate" == "true" ]]; then
+  if [[ "$pruned" == "true" ]] && (( prune_height > 1 )); then
+    echo "Core pruned background blocks below height $prune_height." >&2
+    exit 2
+  fi
+  {
+    for height in $(seq 1 "$snapshot_height"); do
+      block_hash="$("${cli[@]}" getblockhash "$height")"
+      block_raw="$("${cli[@]}" getblock "$block_hash" 0)"
+      printf '%s|%s|%s\n' "$height" "$block_hash" "$block_raw"
+    done
+  } | CONSENSUS_NETWORK="$network" \
+      CONSENSUS_DATABASE="$database" \
+      CONSENSUS_SNAPSHOT_HEIGHT="$snapshot_height" \
+      CONSENSUS_RESTART_INTERVAL="$restart_interval" \
+      clojure -M -e '
+    (require (quote bitcoin.node.disk-consensus)
+             (quote clojure.string))
+    (let [env #(System/getenv %)
+          options {:path (env "CONSENSUS_DATABASE")
+                   :network (keyword (env "CONSENSUS_NETWORK"))}
+          interval (parse-long (env "CONSENSUS_RESTART_INTERVAL"))
+          base-height (parse-long (env "CONSENSUS_SNAPSHOT_HEIGHT"))
+          node (volatile! (bitcoin.node.disk-consensus/open options))
+          verified (volatile! 0)]
+      (doseq [line (line-seq (java.io.BufferedReader. *in*))]
+        (let [[height expected-hash hex] (clojure.string/split line #"\|")
+              height (parse-long height)
+              bytes (mapv #(Integer/parseInt (apply str %) 16)
+                          (partition 2 hex))
+              status
+              (bitcoin.node.disk-consensus/accept-background-block!
+               @node bytes (quot (System/currentTimeMillis) 1000))]
+          (when-not
+           (if (= height base-height)
+             (and (= :validated (:snapshot-status status))
+                  (:fully-validated? status))
+             (= [height expected-hash]
+                [(:background-height status) (:background-tip status)]))
+            (throw (ex-info "Background disk consensus mismatch."
+                            {:height height :expected expected-hash
+                             :status status})))
+          (vswap! verified inc)
+          (when (and (< height base-height)
+                     (zero? (mod height interval)))
+            (vreset! node (bitcoin.node.disk-consensus/open options)))))
+      (let [status (bitcoin.node.disk-consensus/consensus-status @node)]
+        (when-not (and (= :validated (:snapshot-status status))
+                       (:fully-validated? status)
+                       (bitcoin.node.disk-consensus/ready? @node))
+          (throw (ex-info "Background validation did not promote snapshot."
+                          {:status status})))
+        (println
+         (str "background-verified=" @verified
+              " snapshot=" (name (:snapshot-status status))
+              " ready=true"))))'
+fi

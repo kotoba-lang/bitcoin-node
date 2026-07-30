@@ -2,6 +2,7 @@
   (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
+            [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.node.consensus :as consensus]
@@ -21,9 +22,11 @@
     (try
       (run! path)
       (finally
-        (doseq [suffix ["-shm" "-wal" ""]]
+        (doseq [target [path (Path/of (str path ".background")
+                                     (make-array String 0))]
+                suffix ["-shm" "-wal" ""]]
           (Files/deleteIfExists
-           (Path/of (str path suffix) (make-array String 0))))
+           (Path/of (str target suffix) (make-array String 0))))
         (Files/deleteIfExists directory)))))
 
 (defn- coinbase [height marker]
@@ -112,7 +115,7 @@
               status (disk/consensus-status node)]
           (is (= 3 (:height status)))
           (is (= expected (:best-block status)))
-          (is (= 4 (:utxo-count status)))
+          (is (= 3 (:utxo-count status)))
           (is (nil? (get-in @(:state node) [:nodes expected :undo])))
           (is (= expected
                  (:best-block
@@ -175,7 +178,15 @@
               :snapshot-options options})]
         (is (= :assumed (:snapshot-status
                          (disk/consensus-status node))))
+        (is (= 0 (:background-height
+                  (disk/consensus-status node))))
         (is (false? (disk/ready? node)))
+        (is (= :bitcoin.node/background-incomplete
+               (:type
+                (ex-data
+                 (try
+                   (disk/verify-background! node)
+                   (catch clojure.lang.ExceptionInfo error error))))))
         (is (= 3
                (:height
                 (disk/accept-block!
@@ -183,4 +194,73 @@
         (let [reopened (disk/open {:path path :network :regtest})]
           (is (= :assumed
                  (:snapshot-status (disk/consensus-status reopened))))
-          (is (false? (disk/ready? reopened))))))))
+          (is (false? (disk/ready? reopened)))
+          (is (= 1
+                 (:background-height
+                  (disk/accept-background-block!
+                   reopened (block/serialize block-1) 2000000000))))
+          (let [resumed (disk/open {:path path :network :regtest})
+                validated
+                (disk/accept-background-block!
+                 resumed (block/serialize block-2) 2000000000)]
+            (is (= :validated (:snapshot-status validated)))
+            (is (= 3 (:height validated)))
+            (is (nil? (:background-height validated)))
+            (is (:fully-validated? validated))
+            (is (disk/ready? resumed))
+            (is (= :bitcoin.node/no-background-validation
+                   (:type
+                    (ex-data
+                     (try
+                       (disk/accept-background-block!
+                        resumed (block/serialize block-2) 2000000000)
+                       (catch clojure.lang.ExceptionInfo error error))))))
+            (is (= :validated
+                   (:snapshot-status
+                    (disk/consensus-status
+                     (disk/open {:path path :network :regtest})))))))))))
+
+(deftest background-commitment-mismatch-never-promotes-and-can-retry
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            block-1 (fixture/mine-regtest-block genesis 1)
+            full
+            (consensus/open
+             {:network :regtest
+              :genesis-bytes
+              (fixture/hex->bytes fixture/regtest-genesis)})
+            _ (consensus/accept-block!
+               full (block/serialize block-1) 2000000000)
+            coins (get-in @(:state full) [:utxo :coins])
+            base-hash (get-in block-1 [:header :hash-hex])
+            snapshot (fixture/core-snapshot base-hash coins)
+            headers
+            (chainstate/accept-header
+             (chainstate/initialize :regtest genesis)
+             (:header block-1) 2000000000)
+            node
+            (disk/open
+             {:path path :network :regtest
+              :header-state headers :snapshot-source snapshot
+              :snapshot-options
+              {:checkpoints
+               {1 {:blockhash base-hash
+                   :hash-serialized (assumeutxo/hash-serialized coins)
+                   :chain-tx-count 2}}}})]
+        (is (= :bitcoin.consensus/snapshot-background-mismatch
+               (:type
+                (ex-data
+                 (with-redefs [sqlite/hash-serialized
+                               (constantly (apply str (repeat 64 "f")))]
+                   (try
+                     (disk/accept-background-block!
+                      node (block/serialize block-1) 2000000000)
+                     (catch clojure.lang.ExceptionInfo error error)))))))
+        (is (= :assumed
+               (:snapshot-status (disk/consensus-status node))))
+        (is (= 1 (:background-height
+                  (disk/consensus-status node))))
+        (is (= :validated
+               (:snapshot-status (disk/verify-background! node))))
+        (is (disk/ready? node))))))
