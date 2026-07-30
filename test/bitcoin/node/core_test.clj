@@ -3,7 +3,11 @@
             [bitcoin.node.descriptor :as descriptor]
             [bitcoin.node.protocol :as node]
             [clojure.data.json :as json]
-            [clojure.test :refer [deftest is]]))
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is]])
+  (:import [java.io File]
+           [java.nio.file Files]
+           [java.nio.file.attribute PosixFilePermissions]))
 
 (defn- transport
   [result]
@@ -11,6 +15,16 @@
     {:status 200
      :body (json/write-str
             {:jsonrpc "2.0" :id (:id request) :result result})}))
+
+(defn- routed-transport [results]
+  (fn [{:keys [request]}]
+    {:status 200
+     :content-type "application/json; charset=utf-8"
+     :body
+     (json/write-str
+      {:jsonrpc "2.0" :id (:id request)
+       :result (get results [(:method request) (:params request)]
+                    (get results (:method request)))})}))
 
 (def config
   {:url "http://127.0.0.1:8332"
@@ -29,7 +43,42 @@
   (is (thrown?
        clojure.lang.ExceptionInfo
        (core/endpoint
-        (assoc config :url "http://user:secret@127.0.0.1:8332")))))
+        (assoc config :url "http://user:secret@127.0.0.1:8332"))))
+  (is (= :bitcoin.node/invalid-endpoint
+         (:type
+          (ex-data
+           (try
+             (core/endpoint (assoc config :url "://bad"))
+             (catch clojure.lang.ExceptionInfo exception
+               exception)))))))
+
+(deftest cookie-authentication-rejects-broad-posix-permissions
+  (let [cookie (File/createTempFile "bitcoin-node-cookie" ".txt")]
+    (try
+      (spit cookie "__cookie__:secret")
+      (try
+        (Files/setPosixFilePermissions
+         (.toPath cookie) (PosixFilePermissions/fromString "rw-r--r--"))
+        (is (= :bitcoin.node/insecure-cookie
+               (:type
+                (ex-data
+                 (try
+                   (core/credential {:cookie-file (.getPath cookie)})
+                   (catch clojure.lang.ExceptionInfo exception
+                     exception))))))
+        (Files/setPosixFilePermissions
+         (.toPath cookie) (PosixFilePermissions/fromString "rw-------"))
+        (is (= :cookie
+               (:source
+                (core/credential {:cookie-file (.getPath cookie)}))))
+        (catch UnsupportedOperationException _
+          (is (= :cookie
+                 (:source
+                  (core/credential
+                   {:cookie-file (.getPath cookie)
+                    :require-secure-cookie? false}))))))
+      (finally
+        (.delete cookie)))))
 
 (deftest descriptor-policy-rejects-private-and-unsupported-input
   (let [valid {:descriptor
@@ -121,3 +170,208 @@
                        (core/rpc! invalid-json "getblockchaininfo" [])
                        (catch clojure.lang.ExceptionInfo exception
                          exception)))))))))
+
+(deftest identity-is-bound-to-chain-and-genesis
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [genesis "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+          results {"getblockchaininfo" {:chain "main"}
+                   ["getblockhash" [0]] genesis
+                   "getnetworkinfo" {:version 310100
+                                     :subversion "/Satoshi:31.1.0/"
+                                     :protocolversion 70016}}
+          backend
+          (core/backend
+           (assoc config :expected-chain :main
+                  :expected-genesis-hash genesis)
+           (routed-transport results))]
+      (is (= {:backend :bitcoin-core :chain "main"
+              :genesis-hash genesis :core-version 310100
+              :subversion "/Satoshi:31.1.0/"
+              :protocol-version 70016}
+             (node/node-identity backend)))
+      (is (= :bitcoin.node/network-mismatch
+             (:type
+              (ex-data
+               (try
+                 (node/node-identity
+                  (core/backend
+                   (assoc config :expected-chain :regtest)
+                   (routed-transport results)))
+                 (catch clojure.lang.ExceptionInfo exception
+                   exception))))))
+      (is (= :bitcoin.node/genesis-mismatch
+             (:type
+              (ex-data
+               (try
+                 (node/node-identity
+                  (core/backend
+                   (assoc config :expected-chain :main
+                          :expected-genesis-hash (apply str (repeat 64 "0")))
+                   (routed-transport results)))
+                 (catch clojure.lang.ExceptionInfo exception
+                   exception)))))))))
+
+(deftest capabilities-are-discovered-not-assumed
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [network {:networkactive true :connections 8 :warnings []}
+          without-index
+          (node/capabilities
+           (core/backend
+            config
+            (routed-transport
+             {"getnetworkinfo" network "getindexinfo" {}})))
+          with-index
+          (node/capabilities
+           (core/backend
+            config
+            (routed-transport
+             {"getnetworkinfo" network
+              "getindexinfo"
+              {(keyword "basic block filter index")
+               {:synced true :best_block_height 100}}})))]
+      (is (false? (:history-scan? without-index)))
+      (is (true? (:history-scan? with-index)))
+      (is (true? (get-in with-index [:block-filter-index :synced?])))
+      (is (false? (:signing? with-index)))
+      (is (false? (:broadcast? with-index))))))
+
+(deftest descriptor-scans-are-locally-serialized
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [entered (promise)
+          release (promise)
+          backend
+          (core/backend
+           config
+           (fn [{:keys [request]}]
+             (when (= ["start"] (take 1 (:params request)))
+               (deliver entered true)
+               @release)
+             {:status 200
+              :body
+              (json/write-str
+               {:jsonrpc "2.0" :id (:id request)
+                :result {:success true :height 100 :bestblock "abc"
+                         :txouts 1 :total_amount 0
+                         :unspents []}})}))
+          first-scan
+          (future
+            (node/scan-descriptors
+             backend ["tr(xpub-placeholder)#02345678"]))]
+      @entered
+      (is (= :bitcoin.node/scan-busy
+             (:type
+              (ex-data
+               (try
+                 (node/scan-descriptors
+                  backend ["tr(xpub-placeholder)#02345678"])
+                 (catch clojure.lang.ExceptionInfo exception
+                   exception))))))
+      (deliver release true)
+      (is (true? (:success? @first-scan)))
+      (is (= :completed (:status @(:scan-state backend)))))))
+
+(deftest history-scan-fails-closed-without-a-synced-index
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [backend
+          (core/backend
+           config
+           (routed-transport
+            {"getnetworkinfo" {:networkactive true :connections 1}
+             "getindexinfo" {}}))]
+      (is (= :bitcoin.node/capability-unavailable
+             (:type
+              (ex-data
+               (try
+                 (core/scan-blocks
+                  backend ["tr(xpub-placeholder)#02345678"]
+                  {:start-height 0})
+                 (catch clojure.lang.ExceptionInfo exception
+                   exception)))))))))
+
+(deftest history-scan-runs-only-with-a-synced-index
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [calls (atom [])
+          backend
+          (core/backend
+           config
+           (fn [{:keys [request]}]
+             (swap! calls conj [(:method request) (:params request)])
+             {:status 200
+              :body
+              (json/write-str
+               {:jsonrpc "2.0" :id (:id request)
+                :result
+                (case (:method request)
+                  "getnetworkinfo"
+                  {:networkactive true :connections 1}
+                  "getindexinfo"
+                  {(keyword "basic block filter index")
+                   {:synced true :best_block_height 200}}
+                  "scanblocks"
+                  {:from_height 10 :to_height 20
+                   :relevant_blocks ["abc"] :completed true})})}))
+          result
+          (core/scan-blocks
+           backend ["tr(xpub-placeholder)#02345678"]
+           {:start-height 10 :stop-height 20})]
+      (is (= {:completed? true :from-height 10 :to-height 20
+              :relevant-blocks ["abc"]}
+             result))
+      (is (some #(= ["scanblocks"
+                     ["start" ["tr(xpub-placeholder)#02345678"] 10 20]]
+                    %)
+                @calls)))))
+
+(deftest observations-detect-tip-changes
+  (is (node/same-observation?
+       {:height 100 :best-block "abc"}
+       {:blocks 100 :best-block "abc"}))
+  (is (false?
+       (node/same-observation?
+        {:height 100 :best-block "abc"}
+        {:blocks 100 :best-block "def"}))))
+
+(deftest rpc-rejects-non-json-content-type
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [backend
+          (core/backend
+           config
+           (fn [_]
+             {:status 200 :content-type "text/html"
+              :body "<html>proxy error</html>"}))]
+      (is (= :bitcoin.node/invalid-response
+             (:type
+              (ex-data
+               (try
+                 (core/rpc! backend "getblockchaininfo" [])
+                 (catch clojure.lang.ExceptionInfo exception
+                   exception)))))))))
+
+(deftest rpc-wraps-transport-failures-without-secret-data
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [backend
+          (core/backend
+           config
+           (fn [_] (throw (java.net.http.HttpTimeoutException. "timeout"))))
+          exception
+          (try
+            (core/rpc! backend "getblockchaininfo" [])
+            (catch clojure.lang.ExceptionInfo caught
+              caught))]
+      (is (= :bitcoin.node/transport-failed
+             (:type (ex-data exception))))
+      (is (not (str/includes? (pr-str (ex-data exception)) "secret"))))))

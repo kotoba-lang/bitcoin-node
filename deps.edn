@@ -9,4 +9,11 @@
   :lint {:replace-deps {clj-kondo/clj-kondo
                         {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
-                     "--fail-level" "error"]}}}
+                     "--fail-level" "error"]}
+  :coverage
+  {:extra-paths ["test"]
+   :extra-deps {cloverage/cloverage {:mvn/version "1.2.4"}}
+   :main-opts ["-m" "cloverage.coverage"
+               "-p" "src" "-s" "test"
+               "--no-html" "--text"
+               "--fail-threshold" "70"]}}}

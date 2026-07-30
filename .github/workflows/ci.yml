@@ -33,3 +33,4 @@ jobs:
           key: ${{ runner.os }}-jdk${{ matrix.java }}-clj-${{ hashFiles('deps.edn') }}
       - run: clojure -M:test
       - run: clojure -M:lint
+      - run: clojure -M:coverage

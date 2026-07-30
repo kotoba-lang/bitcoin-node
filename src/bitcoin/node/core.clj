@@ -12,11 +12,15 @@
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandlers]
            [java.nio.charset StandardCharsets]
+           [java.nio.file Files LinkOption]
+           [java.nio.file.attribute PosixFilePermission]
            [java.time Duration]
+           [java.time Instant]
            [java.util Base64 UUID]))
 
 (def allowed-methods
   #{"getblockchaininfo" "getdescriptorinfo" "deriveaddresses"
+    "getblockhash" "getindexinfo" "getnetworkinfo" "scanblocks"
     "scantxoutset"})
 
 (def default-max-response-bytes (* 32 1024 1024))
@@ -24,6 +28,21 @@
 (def max-derived-addresses 1000)
 
 (declare rpc!)
+
+(defn- insecure-posix-cookie? [file]
+  (try
+    (let [permissions
+          (Files/getPosixFilePermissions
+           (.toPath file) (make-array LinkOption 0))]
+      (boolean
+       (some #(contains? permissions %)
+             [PosixFilePermission/GROUP_READ
+              PosixFilePermission/GROUP_WRITE
+              PosixFilePermission/GROUP_EXECUTE
+              PosixFilePermission/OTHERS_READ
+              PosixFilePermission/OTHERS_WRITE
+              PosixFilePermission/OTHERS_EXECUTE])))
+    (catch UnsupportedOperationException _ false)))
 
 (defn- expanded-file [path]
   (when path
@@ -39,7 +58,12 @@
   (let [cookie (expanded-file (:cookie-file configuration))]
     (cond
       (and cookie (.isFile cookie))
-      (let [[username password] (str/split (str/trim (slurp cookie)) #":" 2)]
+      (let [_ (when (and (not (false? (:require-secure-cookie? configuration)))
+                         (insecure-posix-cookie? cookie))
+                (throw
+                 (ex-info "Bitcoin Core cookie permissions are too broad."
+                          {:type :bitcoin.node/insecure-cookie})))
+            [username password] (str/split (str/trim (slurp cookie)) #":" 2)]
         (when (and (seq username) (seq password))
           {:username username :password password :source :cookie}))
 
@@ -55,17 +79,41 @@
   "Validate an RPC endpoint. Remote RPC requires an explicit opt-in; userinfo,
   query strings, and fragments are never accepted."
   [configuration]
-  (let [value (:url configuration)
-        uri (when value (URI/create value))
-        host (some-> uri .getHost)]
-    (when-not (and uri (#{"http" "https"} (.getScheme uri))
-                   host (nil? (.getUserInfo uri)) (nil? (.getQuery uri))
-                   (nil? (.getFragment uri))
-                   (or (true? (:allow-remote? configuration))
-                       (.isLoopbackAddress (InetAddress/getByName host))))
-      (throw (ex-info "Bitcoin Core RPC endpoint is not allowed."
-                      {:type :bitcoin.node/invalid-endpoint})))
-    uri))
+  (try
+    (let [value (:url configuration)
+          uri (when value (URI/create value))
+          host (some-> uri .getHost)]
+      (when-not (and uri (#{"http" "https"} (.getScheme uri))
+                     host (nil? (.getUserInfo uri)) (nil? (.getQuery uri))
+                     (nil? (.getFragment uri))
+                     (or (true? (:allow-remote? configuration))
+                         (.isLoopbackAddress (InetAddress/getByName host))))
+        (throw (ex-info "Bitcoin Core RPC endpoint is not allowed."
+                        {:type :bitcoin.node/invalid-endpoint})))
+      uri)
+    (catch clojure.lang.ExceptionInfo exception
+      (throw exception))
+    (catch Exception _
+      (throw (ex-info "Bitcoin Core RPC endpoint is invalid."
+                      {:type :bitcoin.node/invalid-endpoint})))))
+
+(defn- expected-chain [configuration]
+  (some-> (:expected-chain configuration) name))
+
+(defn- validate-chain! [configuration actual]
+  (when-let [expected (expected-chain configuration)]
+    (when-not (= expected actual)
+      (throw
+       (ex-info "Bitcoin Core is connected to the wrong chain."
+                {:type :bitcoin.node/network-mismatch
+                 :expected expected :actual actual})))))
+
+(defn- validate-genesis! [configuration actual]
+  (when-let [expected (:expected-genesis-hash configuration)]
+    (when-not (= (str/lower-case expected) (str/lower-case actual))
+      (throw
+       (ex-info "Bitcoin Core genesis block does not match configuration."
+                {:type :bitcoin.node/genesis-mismatch})))))
 
 (defn- valid-descriptor? [value]
   (and (string? value)
@@ -124,19 +172,84 @@
         response (.send client http-request
                         (HttpResponse$BodyHandlers/ofInputStream))]
     {:status (.statusCode response)
+     :content-type
+     (some-> (.firstValue (.headers response) "content-type")
+             (.orElse nil))
      :body (read-limited
             (.body response)
             (long (or (:max-response-bytes configuration)
                       default-max-response-bytes)))}))
 
-(defrecord CoreBackend [configuration transport]
+(defn- start-local-scan! [scan-state]
+  (let [scan-id (str (UUID/randomUUID))
+        started {:status :running :scan-id scan-id
+                 :started-at (str (Instant/now))}
+        [before after]
+        (swap-vals! scan-state
+                    #(if (contains? #{:running :abort-requested} (:status %))
+                       %
+                       started))]
+    (when (= before after)
+      (throw (ex-info "A Bitcoin descriptor scan is already running."
+                      {:type :bitcoin.node/scan-busy
+                       :scan-id (:scan-id before)})))
+    started))
+
+(defn- finish-local-scan! [scan-state started status details]
+  (swap! scan-state
+         (fn [current]
+           (if (= (:scan-id started) (:scan-id current))
+             (merge started {:status status
+                             :finished-at (str (Instant/now))}
+                    details)
+             current))))
+
+(defrecord CoreBackend [configuration transport scan-state]
   node/NodeBackend
   (configured? [_]
     (boolean (and (:url configuration) (credential configuration))))
+  (node-identity [this]
+    (let [chain-info (rpc! this "getblockchaininfo" [])
+          chain (:chain chain-info)
+          genesis (rpc! this "getblockhash" [0])
+          network-info (rpc! this "getnetworkinfo" [])]
+      (validate-chain! configuration chain)
+      (validate-genesis! configuration genesis)
+      {:backend :bitcoin-core
+       :chain chain
+       :genesis-hash genesis
+       :core-version (:version network-info)
+       :subversion (:subversion network-info)
+       :protocol-version (:protocolversion network-info)}))
+  (capabilities [this]
+    (let [network-info (rpc! this "getnetworkinfo" [])
+          indexes (rpc! this "getindexinfo" [])
+          filter-index
+          (some (fn [[index-name value]]
+                  (when (str/includes? (name index-name) "block filter")
+                    value))
+                indexes)]
+      {:watch-only? true
+       :signing? false
+       :broadcast? false
+       :descriptor-policy? true
+       :utxo-scan? true
+       :history-scan? (boolean filter-index)
+       :block-filter-index
+       (when filter-index
+         {:synced? (true? (:synced filter-index))
+          :best-block-height (:best_block_height filter-index)})
+       :network-active? (true? (:networkactive network-info))
+       :connections (:connections network-info)
+       :warnings (vec (:warnings network-info))
+       :allowed-rpc-methods (vec (sort allowed-methods))}))
   (node-status [this]
     (let [result (rpc! this "getblockchaininfo" [])]
+      (validate-chain! configuration (:chain result))
       {:status :connected :chain (:chain result)
        :blocks (:blocks result) :headers (:headers result)
+       :best-block (:bestblockhash result)
+       :chainwork (:chainwork result)
        :verification-progress (:verificationprogress result)
        :initial-block-download? (:initialblockdownload result)
        :pruned? (:pruned result)
@@ -157,17 +270,78 @@
           (cond-> [value] range-value (conj range-value))))
   (scan-descriptors [this descriptors]
     (validate-scan! descriptors)
-    (let [result (rpc! this "scantxoutset" ["start" (vec descriptors)])]
-      {:success? (true? (:success result))
-       :height (:height result)
-       :best-block (:bestblock result)
-       :total-amount (:total_amount result)
-       :unspents (vec (:unspents result))})))
+    (let [started (start-local-scan! scan-state)]
+      (try
+        (let [result (rpc! this "scantxoutset" ["start" (vec descriptors)])
+              normalized
+              {:scan-id (:scan-id started)
+               :success? (true? (:success result))
+               :height (:height result)
+               :best-block (:bestblock result)
+               :txouts-scanned (:txouts result)
+               :total-amount (:total_amount result)
+               :unspents (vec (:unspents result))}]
+          (finish-local-scan! scan-state started
+                              (if (:success? normalized)
+                                :completed :aborted)
+                              (dissoc normalized :unspents))
+          normalized)
+        (catch Exception exception
+          (finish-local-scan! scan-state started :failed
+                              {:error-type (some-> exception ex-data :type)})
+          (throw exception)))))
+  (scan-status [this]
+    (let [local @scan-state
+          core-status (rpc! this "scantxoutset" ["status"])]
+      (cond-> (assoc local :core-running? (boolean core-status))
+        core-status
+        (assoc :progress (:progress core-status)))))
+  (abort-scan! [this]
+    (let [aborted? (true? (rpc! this "scantxoutset" ["abort"]))]
+      (when aborted?
+        (swap! scan-state
+               (fn [current]
+                 (assoc current
+                        :status
+                        (if (= :running (:status current))
+                          :abort-requested
+                          (:status current))
+                        :abort-requested-at (str (Instant/now))))))
+      {:abort-requested? aborted?
+       :scan-id (:scan-id @scan-state)})))
 
 (defn backend
   ([configuration] (backend configuration http-transport))
   ([configuration transport]
-   (->CoreBackend configuration transport)))
+   (->CoreBackend configuration transport (atom {:status :idle}))))
+
+(defn scan-blocks
+  "Scan compact block filters for descriptor history candidates. This is
+  deliberately Core-specific and refuses to run until the block filter index
+  exists and is fully synced."
+  [backend descriptors {:keys [start-height stop-height]
+                        :or {start-height 0}}]
+  (validate-scan! descriptors)
+  (when-not (and (nat-int? start-height)
+                 (or (nil? stop-height)
+                     (and (nat-int? stop-height)
+                          (<= start-height stop-height))))
+    (throw (ex-info "Bitcoin history scan range is invalid."
+                    {:type :bitcoin.node/invalid-range})))
+  (let [capability (node/capabilities backend)]
+    (when-not (and (:history-scan? capability)
+                   (get-in capability [:block-filter-index :synced?]))
+      (throw
+       (ex-info "Bitcoin block filter index is not ready."
+                {:type :bitcoin.node/capability-unavailable
+                 :capability :history-scan}))))
+  (let [params (cond-> ["start" (vec descriptors) start-height]
+                 stop-height (conj stop-height))
+        result (rpc! backend "scanblocks" params)]
+    {:completed? (true? (:completed result))
+     :from-height (:from_height result)
+     :to-height (:to_height result)
+     :relevant-blocks (vec (:relevant_blocks result))}))
 
 (defn rpc!
   [backend method params]
@@ -188,11 +362,32 @@
               (.getBytes (str username ":" password)
                          StandardCharsets/UTF_8)))
         response
-        ((:transport backend)
-         {:configuration configuration :uri uri
-          :authorization authorization
-          :request {:jsonrpc "2.0" :id request-id
-                    :method method :params params}})
+        (try
+          ((:transport backend)
+           {:configuration configuration :uri uri
+            :authorization authorization
+            :request {:jsonrpc "2.0" :id request-id
+                      :method method :params params}})
+          (catch clojure.lang.ExceptionInfo exception
+            (if (some-> exception ex-data :type)
+              (throw exception)
+              (throw
+               (ex-info "Bitcoin Core RPC transport failed."
+                        {:type :bitcoin.node/transport-failed}
+                        exception))))
+          (catch Exception exception
+            (throw
+             (ex-info "Bitcoin Core RPC transport failed."
+                      {:type :bitcoin.node/transport-failed}
+                      exception))))
+        _ (when (and (:content-type response)
+                     (not (str/includes?
+                           (str/lower-case (:content-type response))
+                           "application/json")))
+            (throw
+             (ex-info "Bitcoin Core RPC returned an invalid content type."
+                      {:type :bitcoin.node/invalid-response
+                       :status (:status response)})))
         payload (try
                   (json/read-str (:body response) :key-fn keyword)
                   (catch Exception _
