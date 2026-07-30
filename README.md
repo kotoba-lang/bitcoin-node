@@ -25,6 +25,12 @@ v2 AssumeUTXO activation while retaining a separate fully validated background
 chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
 
+`bitcoin.node.disk-utxo` exposes the mainnet-scale SQLite UTXO host. It parses
+raw blocks, derives consensus Script flags, atomically commits touched
+outpoints plus undo, supports durable tip disconnect and integrity checks, and
+streams authenticated AssumeUTXO snapshots without materializing all coins.
+Header/fork selection remains owned by `bitcoin.node.consensus`.
+
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
 response size, correlates JSON-RPC IDs, and allows only:

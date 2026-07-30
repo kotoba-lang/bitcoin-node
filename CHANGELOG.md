@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 — 2026-07-30
+
+- Upgrade to `bitcoin-consensus` v0.6.1 with complete Core Script-vector
+  parity and historical soft-fork flag selection.
+- Add a node-facing SQLite UTXO host for raw block parsing, network deployment
+  flags, atomic connect/undo, durable disconnect, integrity checks, and
+  constant-memory authenticated AssumeUTXO import.
+- Require independently validated MTP context before connecting CSV-active
+  history and reject blocks that do not extend the durable tip.
+
 ## 0.6.0 — 2026-07-30
 
 - Upgrade the embedded kernel to `bitcoin-consensus` v0.5.1.
