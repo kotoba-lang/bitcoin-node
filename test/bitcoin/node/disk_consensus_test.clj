@@ -1,7 +1,10 @@
 (ns bitcoin.node.disk-consensus-test
-  (:require [bitcoin.consensus.block :as block]
+  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+            [bitcoin.consensus.block :as block]
+            [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
+            [bitcoin.node.consensus :as consensus]
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.disk-consensus :as disk]
             [bitcoin.node.disk-utxo :as disk-utxo]
@@ -129,3 +132,55 @@
                  (try
                    (disk/open {:path path :network :regtest})
                    (catch clojure.lang.ExceptionInfo error error))))))))))
+
+(deftest assumeutxo-start-is-atomic-unready-and-restart-safe
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            block-1 (fixture/mine-regtest-block genesis 1)
+            block-2 (fixture/mine-regtest-block block-1 2)
+            block-3 (fixture/mine-regtest-block block-2 3)
+            full
+            (consensus/open
+             {:network :regtest
+              :genesis-bytes
+              (fixture/hex->bytes fixture/regtest-genesis)})
+            _ (consensus/accept-block!
+               full (block/serialize block-1) 2000000000)
+            _ (consensus/accept-block!
+               full (block/serialize block-2) 2000000000)
+            coins (get-in @(:state full) [:utxo :coins])
+            base-hash (get-in block-2 [:header :hash-hex])
+            snapshot (fixture/core-snapshot base-hash coins)
+            commitment
+            (assumeutxo/hash-serialized coins)
+            headers
+            (-> (chainstate/initialize :regtest genesis)
+                (chainstate/accept-header
+                 (:header block-1) 2000000000)
+                (chainstate/accept-header
+                 (:header block-2) 2000000000)
+                (chainstate/accept-header
+                 (:header block-3) 2000000000))
+            options
+            {:checkpoints
+             {2 {:blockhash base-hash
+                 :hash-serialized commitment
+                 :chain-tx-count 3}}}
+            node
+            (disk/open
+             {:path path :network :regtest
+              :header-state headers
+              :snapshot-source snapshot
+              :snapshot-options options})]
+        (is (= :assumed (:snapshot-status
+                         (disk/consensus-status node))))
+        (is (false? (disk/ready? node)))
+        (is (= 3
+               (:height
+                (disk/accept-block!
+                 node (block/serialize block-3) 2000000000))))
+        (let [reopened (disk/open {:path path :network :regtest})]
+          (is (= :assumed
+                 (:snapshot-status (disk/consensus-status reopened))))
+          (is (false? (disk/ready? reopened))))))))

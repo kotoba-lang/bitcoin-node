@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.1 — 2026-07-30
+
+- Add atomic AssumeUTXO initialization to the disk consensus host using an
+  independently validated headers-only state.
+- Keep snapshot-start nodes explicitly unready while background validation is
+  pending, including after validating later blocks and across process restart.
+- Upgrade to `bitcoin-consensus` v0.7.1 so snapshot UTXO, trust status, and
+  fork-choice metadata share one SQLite transaction.
+
 ## 0.8.0 — 2026-07-30
 
 - Upgrade to `bitcoin-consensus` v0.7.0 for testnet4, default signet,

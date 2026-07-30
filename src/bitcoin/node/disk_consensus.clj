@@ -5,7 +5,8 @@
   journals share one commit boundary. Active block bodies and undo values are
   pruned from the metadata blob after commit; side-chain bodies are retained
   until they are either activated or explicitly resubmitted."
-  (:require [bitcoin.consensus.block :as block]
+  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+            [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sqlite-utxo :as sqlite]
@@ -88,6 +89,40 @@
         (sqlite/rollback! view)
         (throw error)))))
 
+(defn- best-header-hash-at-height [state height]
+  (loop [hash (:best-header state)]
+    (let [node (get-in state [:nodes hash])]
+      (cond
+        (nil? node) nil
+        (= height (:height node)) hash
+        (< (:height node) height) nil
+        :else (recur (:parent node))))))
+
+(defn- seed-assumeutxo!
+  [backend network header-state snapshot-source snapshot-options]
+  (when-not (= network (:network header-state))
+    (fail! :bitcoin.node/snapshot-header-network
+           "AssumeUTXO header state belongs to another network."
+           {:expected network :actual (:network header-state)}))
+  (when-not (zero? (chainstate/active-height header-state))
+    (fail! :bitcoin.node/snapshot-header-active-tip
+           "Snapshot initialization requires a headers-only state at genesis."
+           {:height (chainstate/active-height header-state)}))
+  (let [result (volatile! nil)]
+    (sqlite/import-snapshot!
+     backend snapshot-source
+     #(best-header-hash-at-height header-state %)
+     (assoc
+      snapshot-options
+      :host-state-fn
+      (fn [loaded]
+        (let [activated (assumeutxo/activate header-state loaded)
+              coin-count (get-in loaded [:snapshot :coins-count])
+              durable (strip-active-data activated coin-count)]
+          (vreset! result durable)
+          (storage/encode durable)))))
+    @result))
+
 (defn open
   "Open or initialize an atomic disk-backed consensus node.
 
@@ -95,7 +130,7 @@
   database without matching host metadata is rejected instead of guessing its
   header or fork-choice state."
   [{:keys [path datasource network genesis-bytes verify-script
-           busy-timeout-ms]
+           busy-timeout-ms snapshot-source header-state snapshot-options]
     :or {busy-timeout-ms 5000}}]
   (when-not (contains? chainstate/consensus-parameters network)
     (fail! :bitcoin.node/unsupported-consensus-network
@@ -110,6 +145,16 @@
         (cond
           bytes
           (validate-durable-tip! (storage/decode bytes network) durable)
+
+          (and (= -1 (:height durable)) snapshot-source)
+          (do
+            (when-not header-state
+              (fail! :bitcoin.node/missing-snapshot-headers
+                     "Snapshot initialization requires validated headers."
+                     {:network network}))
+            (seed-assumeutxo!
+             backend network header-state snapshot-source
+             (or snapshot-options {})))
 
           (= -1 (:height durable))
           (do
@@ -143,7 +188,10 @@
      :best-header-height (get-in state [:nodes best :height])
      :chainwork (get-in state [:nodes tip :chainwork])
      :utxo-count (:coin-count durable)
-     :fully-validated? (true? (get-in state [:nodes tip :block-valid?]))
+     :fully-validated?
+     (and (not= :assumed (get-in state [:snapshot :status]))
+          (true? (get-in state [:nodes tip :block-valid?])))
+     :snapshot-status (get-in state [:snapshot :status])
      :persistent? true}))
 
 (defn ready? [node]

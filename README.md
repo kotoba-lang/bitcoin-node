@@ -133,6 +133,13 @@ After the initial database is seeded, `genesis-bytes` may be omitted on
 restart. A populated legacy UTXO database without the matching atomic
 chainstate blob is rejected; it is never assigned inferred fork-choice state.
 
+For snapshot-start, pass an authenticated Core v2 snapshot as
+`:snapshot-source` and a separately PoW/difficulty-validated, headers-only
+chainstate as `:header-state`. The snapshot base must be on its most-work
+header chain. UTXOs, `:assumed` trust status, active tip, and headers are
+committed together; `ready?` remains false across restart until independent
+background validation reproduces the pinned UTXO commitment.
+
 An AssumeUTXO state reports `:snapshot-status :assumed` until background
 validation reaches the exact base and recomputes the pinned UTXO commitment.
 The assumed and background chainstates are persisted separately; startup fails
