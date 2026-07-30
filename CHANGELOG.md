@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0 — 2026-07-30
+
+- Add bounded witness-capable P2P full-block retrieval with exact requested
+  hash verification, explicit `notfound`, malformed-block, and timeout errors.
+- Validate the implementation against a live mainnet peer and a retained Core
+  block at height 385,310: 627,730 serialized bytes and 489 transactions
+  matched Core exactly.
+
 ## 0.10.0 — 2026-07-30
 
 - Add a bounded JVM Bitcoin P2P client for all supported networks with

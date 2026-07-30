@@ -23,6 +23,7 @@
   (close [_] (.close socket)))
 
 (def minimum-peer-version 31800)
+(def witness-block-inventory-type 0x40000002)
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
@@ -182,6 +183,57 @@
     (catch SocketTimeoutException error
       (throw
        (ex-info "Bitcoin peer headers request timed out."
+                {:type :bitcoin.node/peer-timeout}
+                error)))))
+
+(defn get-block!
+  "Fetch one witness-capable raw block by its natural-order 32-byte hash.
+
+  The response remains bounded by the transport payload limit and its header
+  hash must match the request before raw bytes are returned for full consensus
+  validation by `bitcoin.node.disk-consensus/accept-block!`."
+  [connection block-hash]
+  (when-not (= 32 (count block-hash))
+    (fail! :bitcoin.node/peer-block-hash
+           "Block request requires one natural-order 32-byte hash."
+           {:length (count block-hash)}))
+  (write-message!
+   (:output connection) (:magic connection) "getdata"
+   (vec
+    (concat
+     (protocol/encode-varint 1)
+     (protocol/uint-le->bytes witness-block-inventory-type 4)
+     block-hash)))
+  (try
+    (loop []
+      (let [message (read-message! (:input connection)
+                                   (:magic connection))
+            _ (handle-control! connection message)]
+        (case (:command message)
+          "block"
+          (let [payload (:payload message)]
+            (when (< (count payload) protocol/block-header-size)
+              (fail! :bitcoin.node/peer-malformed-block
+                     "Bitcoin peer returned a truncated block."
+                     {:length (count payload)}))
+            (let [actual
+                  (:hash
+                   (protocol/decode-block-header
+                    (subvec payload 0 protocol/block-header-size)))]
+              (when-not (= block-hash actual)
+                (fail! :bitcoin.node/peer-unrequested-block
+                       "Bitcoin peer returned a different block."
+                       {:requested block-hash :actual actual}))
+              payload))
+
+          "notfound"
+          (fail! :bitcoin.node/peer-block-not-found
+                 "Bitcoin peer does not have the requested block." {})
+
+          (recur))))
+    (catch SocketTimeoutException error
+      (throw
+       (ex-info "Bitcoin peer block request timed out."
                 {:type :bitcoin.node/peer-timeout}
                 error)))))
 

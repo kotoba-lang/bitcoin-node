@@ -87,7 +87,12 @@
                   (send-message!
                    output magic "headers"
                    (protocol/encode-headers-payload expected))
-                  decoded))))
+                  (let [block-request (read-message input)]
+                    (is (= "getdata" (:command block-request)))
+                    (send-message!
+                     output magic "block" (block/serialize block-1))
+                    (assoc decoded
+                           :block-request (:payload block-request)))))))
           connection
           (peer/connect!
            {:host "127.0.0.1" :port (.getLocalPort server)
@@ -105,9 +110,19 @@
           (is (= {:status :synced :batches 1 :accepted 2
                   :locator (get-in block-2 [:header :hash])}
                  result)))
+        (is (= (block/serialize block-1)
+               (peer/get-block!
+                connection (get-in block-1 [:header :hash]))))
         (is (= [(get-in genesis [:header :hash])]
                (:locator-hashes @server-result)))
-      (finally
+        (is (= (vec
+                (concat
+                 [1]
+                 (protocol/uint-le->bytes
+                  peer/witness-block-inventory-type 4)
+                 (get-in block-1 [:header :hash])))
+               (:block-request @server-result)))
+        (finally
           (peer/close! connection))))))
 
 (deftest obsolete-peer-version-fails-closed
@@ -174,4 +189,10 @@
           (ex-data
            (try
              (peer/get-headers! {} [])
+             (catch clojure.lang.ExceptionInfo error error))))))
+  (is (= :bitcoin.node/peer-block-hash
+         (:type
+          (ex-data
+           (try
+             (peer/get-block! {} [])
              (catch clojure.lang.ExceptionInfo error error)))))))

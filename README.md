@@ -46,7 +46,10 @@ payloads, and retrieves headers in protocol-sized batches. The disk host
 builds a sparse Bitcoin-style block locator, validates every returned header,
 and commits each batch atomically, so synchronization resumes after restart
 and can find a common ancestor after a reorganization. It deliberately has no
-transaction relay, mempool, wallet, signing, or mining commands.
+transaction relay, mempool, wallet, signing, or mining commands. Retained
+blocks can be requested individually with witness data; the response header
+must match the requested hash before the raw block is returned to the full
+consensus validator.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
@@ -147,7 +150,9 @@ Direct header synchronization:
             (peer/connect! {:host "127.0.0.1" :network :mainnet
                             :timeout-ms 30000})]
   (disk-consensus/sync-headers!
-   durable connection unix-time {:max-batches 500}))
+   durable connection unix-time {:max-batches 500})
+  (let [raw-block (peer/get-block! connection block-hash-natural)]
+    (disk-consensus/accept-block! durable raw-block unix-time)))
 ```
 
 After the initial database is seeded, `genesis-bytes` may be omitted on
