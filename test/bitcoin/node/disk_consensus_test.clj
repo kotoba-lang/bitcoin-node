@@ -9,6 +9,7 @@
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.disk-consensus :as disk]
             [bitcoin.node.disk-utxo :as disk-utxo]
+            [bitcoin.node.peer :as peer]
             [clojure.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header])
   (:import [java.nio.file Files Path]
@@ -75,10 +76,12 @@
                         :genesis-bytes
                         (fixture/hex->bytes fixture/regtest-genesis)})]
         (is (disk/ready? node))
-        (is (= 1
+        (is (= 2
                (:best-header-height
-                (disk/accept-header!
-                 node (get-in block-1 [:header :bytes]) 2000000000))))
+                (disk/accept-headers!
+                 node [(get-in block-1 [:header :bytes])
+                       (get-in block-2 [:header :bytes])]
+                 2000000000))))
         (is (= 1
                (:height
                 (disk/accept-block!
@@ -95,6 +98,53 @@
           (is (= (disk/consensus-status node)
                  (disk/consensus-status reopened)))
           (is (disk/ready? reopened)))))))
+
+(deftest block-locator-is-dense-then-exponentially-backtracks-to-genesis
+  (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+        blocks (rest (reductions fixture/mine-regtest-block genesis
+                                 (range 1 26)))
+        state
+        (reduce
+         #(chainstate/accept-header %1 (:header %2) 2000000000)
+         (chainstate/initialize :regtest genesis)
+         blocks)
+        locator (disk/block-locator state)
+        heights
+        (mapv #(get-in state [:nodes (header/natural-hash->hex %) :height])
+              locator)]
+    (is (= [25 24 23 22 21 20 19 18 17 16 14 10 2 0] heights))
+    (is (= (get-in genesis [:header :hash]) (last locator)))))
+
+(deftest peer-header-sync-validates-persists-and-resumes-from-durable-tip
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            block-1 (fixture/mine-regtest-block genesis 1)
+            block-2 (fixture/mine-regtest-block block-1 2)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            result
+            (with-redefs
+             [peer/sync-headers!
+              (fn [_ locator accept-batch! options]
+                (is (= [(get-in genesis [:header :hash])] locator))
+                (is (= {:max-batches 3} options))
+                (accept-batch! [(:header block-1) (:header block-2)])
+                {:status :synced :batches 1 :accepted 2})]
+              (disk/sync-headers!
+               node ::connection 2000000000 {:max-batches 3}))]
+        (is (= {:status :synced :batches 1 :accepted 2} result))
+        (let [reopened (disk/open {:path path :network :regtest})
+              status (disk/consensus-status reopened)]
+          (is (= 2 (:best-header-height status)))
+          (is (= (get-in block-2 [:header :hash-hex])
+                 (:best-header status)))
+          (is (= [(get-in block-2 [:header :hash])
+                  (get-in block-1 [:header :hash])
+                  (get-in genesis [:header :hash])]
+                 (disk/block-locator @(:state reopened)))))))))
 
 (deftest disk-consensus-reorganizes-with-durable-undo
   (with-store

@@ -12,6 +12,7 @@
             [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.utxo :as utxo]
+            [bitcoin.node.peer :as peer]
             [kotobase.bitcoin.protocol :as header]))
 
 (defrecord DiskConsensusNode
@@ -258,13 +259,24 @@
 (defn integrity-check! [node]
   (sqlite/integrity-check! (:backend node)))
 
+(declare accept-headers!)
+
 (defn accept-header!
   "Validate and durably index one raw 80-byte header."
   [node raw-header now]
+  (accept-headers! node [raw-header] now))
+
+(defn accept-headers!
+  "Validate a chronological header batch and persist it once, atomically.
+  No header in a failing batch becomes visible."
+  [node raw-headers now]
   (locking node
     (let [before @(:state node)
-          after (chainstate/accept-header
-                 before (header/decode-block-header (vec raw-header)) now)
+          after
+          (chainstate/accept-headers
+           before
+           (mapv #(header/decode-block-header (vec %)) raw-headers)
+           now)
           durable (sqlite/status (:backend node))
           stripped (strip-active-data after (:coin-count durable))]
       (validate-durable-tip! before durable)
@@ -273,6 +285,51 @@
        (storage/encode stripped))
       (reset! (:state node) stripped)
       (consensus-status node))))
+
+(defn block-locator
+  "Build a Bitcoin Core-style locator from the best validated header.
+
+  The ten newest entries are consecutive, then the walk doubles its step
+  until genesis. This lets a peer find a common ancestor after deep reorgs
+  and makes restart synchronization independent of the peer that supplied
+  the previous tip."
+  [state]
+  (loop [hash (:best-header state)
+         step 1
+         entries 0
+         locator []]
+    (when-not hash
+      (fail! :bitcoin.node/missing-best-header
+             "Cannot build a locator without a validated best header." {}))
+    (let [node (get-in state [:nodes hash])]
+      (when-not node
+        (fail! :bitcoin.node/missing-header-node
+               "Best-header ancestry is incomplete."
+               {:hash hash}))
+      (let [locator' (conj locator (get-in node [:header :hash]))
+            height (:height node)]
+        (if (zero? height)
+          locator'
+          (let [step' (if (>= entries 9) (* 2 step) step)
+                ancestor
+                (loop [current hash remaining (min step' height)]
+                  (if (zero? remaining)
+                    current
+                    (recur (get-in state [:nodes current :parent])
+                           (dec remaining))))]
+            (recur ancestor step' (inc entries) locator')))))))
+
+(defn sync-headers!
+  "Synchronize validated P2P header batches into this disk consensus node."
+  ([node connection now]
+   (sync-headers! node connection now {}))
+  ([node connection now options]
+   (let [state @(:state node)
+         locator (block-locator state)]
+     (peer/sync-headers!
+      connection locator
+      #(accept-headers! node (mapv :bytes %) now)
+      options))))
 
 (defn- path-to-root [state tip]
   (loop [hash tip result []]

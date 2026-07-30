@@ -39,6 +39,15 @@ touched outpoints plus undo, supports durable tip disconnect and integrity
 checks, and streams authenticated AssumeUTXO snapshots without materializing
 all coins. Its caller owns header validation and fork selection.
 
+`bitcoin.node.peer` adds a bounded, read-only JVM P2P transport for
+mainnet, testnet3, testnet4, signet, and regtest. It performs version/verack,
+answers ping, verifies network magic and checksums before decoding bounded
+payloads, and retrieves headers in protocol-sized batches. The disk host
+builds a sparse Bitcoin-style block locator, validates every returned header,
+and commits each batch atomically, so synchronization resumes after restart
+and can find a common ancestor after a reorganization. It deliberately has no
+transaction relay, mempool, wallet, signing, or mining commands.
+
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
 response size, correlates JSON-RPC IDs, and allows only:
@@ -127,6 +136,18 @@ Atomic disk-backed validation:
 (disk-consensus/accept-block! durable raw-block unix-time)
 (disk-consensus/consensus-status durable)
 (disk-consensus/integrity-check! durable)
+```
+
+Direct header synchronization:
+
+```clojure
+(require '[bitcoin.node.peer :as peer])
+
+(with-open [connection
+            (peer/connect! {:host "127.0.0.1" :network :mainnet
+                            :timeout-ms 30000})]
+  (disk-consensus/sync-headers!
+   durable connection unix-time {:max-batches 500}))
 ```
 
 After the initial database is seeded, `genesis-bytes` may be omitted on

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0 — 2026-07-30
+
+- Add a bounded JVM Bitcoin P2P client for all supported networks with
+  version/verack, ping/pong, checksum and magic validation, payload limits,
+  minimum-version enforcement, and batched `getheaders`.
+- Feed P2P header batches through full header consensus and persist each batch
+  atomically in the disk host.
+- Generate sparse Core-style block locators from durable best-header ancestry
+  for restart and deep-reorganization recovery.
+- Cover real TCP framing, full-range peer nonces, obsolete versions, wrong
+  network magic, corrupt checksums, oversized payloads, and atomic batches.
+- Upgrade to `bitcoin-consensus` v0.8.1 for shared-window atomic batch
+  validation and its corrected P2P wire dependency.
+
 ## 0.9.0 — 2026-07-30
 
 - Maintain a separate genesis-started SQLite consensus database for every
