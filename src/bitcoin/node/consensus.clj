@@ -13,13 +13,11 @@
                      (make-array LinkOption 0))))
 
 (defn open
-  "Open an embedded validating chainstate. `verify-script` is mandatory.
-  Existing snapshots are network-bound; otherwise raw genesis bytes are
-  parsed and used to initialize state."
+  "Open an embedded validating chainstate. The consensus kernel's Script VM is
+  the default; `verify-script` is an optional differential-test override.
+  Existing snapshots are network-bound; otherwise raw genesis bytes initialize
+  state."
   [{:keys [network genesis-bytes verify-script snapshot-path]}]
-  (when-not (ifn? verify-script)
-    (throw (ex-info "Embedded consensus requires a Script verifier."
-                    {:type :bitcoin.node/missing-script-verifier})))
   (let [initial
         (if (existing-snapshot? snapshot-path)
           (storage/load! snapshot-path network)

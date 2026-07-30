@@ -13,8 +13,7 @@
 
 (deftest embedded-consensus-validates-before-publishing-state
   (let [node (consensus/open {:network :mainnet
-                              :genesis-bytes (hex->bytes genesis)
-                              :verify-script (constantly true)})
+                              :genesis-bytes (hex->bytes genesis)})
         before (consensus/consensus-status node)
         after (consensus/accept-block! node (hex->bytes block-one)
                                        2000000000)]
@@ -25,11 +24,13 @@
     (is (:fully-validated? after))
     (is (false? (:persistent? after)))))
 
-(deftest embedded-consensus-requires-script-validation
-  (is (= :bitcoin.node/missing-script-verifier
-         (:type
-          (ex-data
-           (try
-             (consensus/open {:network :mainnet
-                              :genesis-bytes (hex->bytes genesis)})
-             (catch clojure.lang.ExceptionInfo exception exception)))))))
+(deftest embedded-consensus-allows-an-explicit-differential-verifier
+  (let [calls (atom 0)
+        node (consensus/open
+              {:network :mainnet :genesis-bytes (hex->bytes genesis)
+               :verify-script
+               (fn [& _] (swap! calls inc) true)})]
+    (is (consensus/ready? node))
+    ;; Genesis and block one contain coinbase transactions only.
+    (consensus/accept-block! node (hex->bytes block-one) 2000000000)
+    (is (zero? @calls))))

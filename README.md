@@ -18,10 +18,10 @@ Bitcoin Core JSON-RPC adapter for:
 
 It also exposes an opt-in embedded host around
 [`bitcoin-consensus`](https://github.com/kotoba-lang/bitcoin-consensus).
-`bitcoin.node.consensus/open` requires an explicit Script verifier, validates
-raw blocks before atomically publishing state, and can persist checksummed
-chainstate. This path is intended for progressive consensus development; the
-release blockers documented by `bitcoin-consensus` still apply.
+`bitcoin.node.consensus/open` uses its in-process Script VM, validates raw
+blocks before atomically publishing state, and can persist checksummed
+chainstate. A verifier override remains available for differential tests; the
+security boundary documented by `bitcoin-consensus` still applies.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
