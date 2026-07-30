@@ -146,6 +146,51 @@
                   (get-in genesis [:header :hash])]
                  (disk/block-locator @(:state reopened)))))))))
 
+(deftest peer-block-sync-is-bounded-fully-validating-and-resumable
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            block-1 (fixture/mine-regtest-block genesis 1)
+            block-2 (fixture/mine-regtest-block block-1 2)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            _ (disk/accept-headers!
+               node [(get-in block-1 [:header :bytes])
+                     (get-in block-2 [:header :bytes])]
+               2000000000)
+            blocks-by-hash
+            {(get-in block-1 [:header :hash]) (block/serialize block-1)
+             (get-in block-2 [:header :hash]) (block/serialize block-2)}
+            requested (atom [])]
+        (with-redefs
+         [peer/get-block!
+          (fn [_ hash]
+            (swap! requested conj hash)
+            (get blocks-by-hash hash))]
+          (let [first-batch
+                (disk/sync-blocks!
+                 node ::connection 2000000000 {:max-blocks 1})]
+            (is (= :batch-limit (:status first-batch)))
+            (is (= 1 (:downloaded first-batch)))
+            (is (true? (:more? first-batch)))))
+        (let [reopened (disk/open {:path path :network :regtest})]
+          (with-redefs [peer/get-block! (fn [_ hash]
+                                          (swap! requested conj hash)
+                                          (get blocks-by-hash hash))]
+            (let [completed
+                  (disk/sync-blocks!
+                   reopened ::connection 2000000000 {:max-blocks 2})]
+              (is (= :synced (:status completed)))
+              (is (= 1 (:downloaded completed)))
+              (is (false? (:more? completed)))
+              (is (= 2 (get-in completed [:consensus :height])))
+              (is (disk/ready? reopened)))))
+        (is (= [(get-in block-1 [:header :hash])
+                (get-in block-2 [:header :hash])]
+               @requested))))))
+
 (deftest disk-consensus-reorganizes-with-durable-undo
   (with-store
     (fn [path]

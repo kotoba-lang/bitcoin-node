@@ -331,6 +331,50 @@
       #(accept-headers! node (mapv :bytes %) now)
       options))))
 
+(declare accept-block!)
+
+(defn pending-best-chain-blocks
+  "Return natural-order hashes for unvalidated blocks on the best header chain.
+
+  Results are chronological and bounded, so a caller can resume after every
+  atomic block commit without maintaining a separate download cursor."
+  ([node]
+   (pending-best-chain-blocks node 128))
+  ([node limit]
+   (when-not (and (integer? limit) (<= 1 limit 1024))
+     (fail! :bitcoin.node/block-sync-limit
+            "Block synchronization limit must be between 1 and 1,024."
+            {:limit limit}))
+   (let [state @(:state node)
+         chain
+         (loop [hash (:best-header state) result []]
+           (if hash
+             (recur (get-in state [:nodes hash :parent])
+                    (conj result hash))
+             (reverse result)))]
+     (->> chain
+          (remove #(true? (get-in state [:nodes % :block-valid?])))
+          (take limit)
+          (mapv #(get-in state [:nodes % :header :hash]))))))
+
+(defn sync-blocks!
+  "Fetch and fully validate a bounded segment of the best header chain.
+
+  Every block is committed independently through `accept-block!`; interruption
+  therefore resumes from the first unvalidated header without replaying an
+  external cursor."
+  ([node connection now]
+   (sync-blocks! node connection now {}))
+  ([node connection now {:keys [max-blocks] :or {max-blocks 128}}]
+   (let [hashes (pending-best-chain-blocks node max-blocks)]
+     (doseq [hash hashes]
+       (accept-block! node (peer/get-block! connection hash) now))
+     (let [more? (boolean (seq (pending-best-chain-blocks node 1)))]
+       {:status (if more? :batch-limit :synced)
+        :downloaded (count hashes)
+        :more? more?
+        :consensus (consensus-status node)}))))
+
 (defn- path-to-root [state tip]
   (loop [hash tip result []]
     (if hash
@@ -352,8 +396,6 @@
      :height (:height node)
      :previous-height (dec (:height node))
      :undo (:undo node)}))
-
-(declare accept-block!)
 
 (defn- promote-background!
   [node]

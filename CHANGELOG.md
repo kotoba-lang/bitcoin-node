@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0 — 2026-07-30
+
+- Add bounded best-chain block synchronization from P2P retrieval through
+  full transaction, Script, UTXO, and fork-choice validation.
+- Derive the next download set from durable `block-valid?` state so each
+  atomic commit is restart-safe without a separate cursor.
+
 ## 0.11.0 — 2026-07-30
 
 - Add bounded witness-capable P2P full-block retrieval with exact requested

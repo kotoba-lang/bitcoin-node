@@ -151,9 +151,14 @@ Direct header synchronization:
                             :timeout-ms 30000})]
   (disk-consensus/sync-headers!
    durable connection unix-time {:max-batches 500})
-  (let [raw-block (peer/get-block! connection block-hash-natural)]
-    (disk-consensus/accept-block! durable raw-block unix-time)))
+  (disk-consensus/sync-blocks!
+   durable connection unix-time {:max-blocks 128}))
 ```
+
+Block synchronization walks only unvalidated members of the most-work header
+chain, oldest first. Each block is fully validated and committed separately;
+after interruption or restart the next call derives its cursor from durable
+consensus state.
 
 After the initial database is seeded, `genesis-bytes` may be omitted on
 restart. A populated legacy UTXO database without the matching atomic
