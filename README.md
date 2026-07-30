@@ -13,6 +13,8 @@ Backend-neutral, watch-only Bitcoin node integration for Clojure.
 - network/genesis identity binding and Core capability discovery;
 - serialized scan execution, progress reporting, and cancellation;
 - optional compact-block-filter history candidate scans.
+- a CAIP-2 `bip122` snapshot implementing the shared
+  [`chain-observer`](https://github.com/kotoba-lang/chain-observer) contract.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
@@ -47,7 +49,8 @@ equivalent validation semantics and contract tests.
 
 ```clojure
 (require '[bitcoin.node.core :as core]
-         '[bitcoin.node.protocol :as node])
+         '[bitcoin.node.protocol :as node]
+         '[chain.observer.protocol :as observer])
 
 (def backend
   (core/backend
@@ -64,6 +67,7 @@ equivalent validation semantics and contract tests.
 (node/derive-addresses backend "tr(xpub.../0/*)#checksum" [0 4])
 (node/scan-status backend)
 (node/abort-scan! backend)
+(observer/snapshot backend)
 ```
 
 `core/scan-blocks` requires a discovered, fully synchronized basic block

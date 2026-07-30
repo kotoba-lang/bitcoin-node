@@ -4,6 +4,8 @@
   secret-free errors."
   (:require [bitcoin.node.descriptor :as descriptor]
             [bitcoin.node.protocol :as node]
+            [chain.observer.contract :as observation]
+            [chain.observer.protocol :as chain-observer]
             [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str])
@@ -308,7 +310,39 @@
                           (:status current))
                         :abort-requested-at (str (Instant/now))))))
       {:abort-requested? aborted?
-       :scan-id (:scan-id @scan-state)})))
+       :scan-id (:scan-id @scan-state)}))
+
+  chain-observer/ChainObserver
+  (snapshot [this]
+    (let [status (node/node-status this)
+          identity (node/node-identity this)
+          runtime-capabilities (node/capabilities this)
+          genesis (:genesis-hash identity)
+          history? (:history-scan? runtime-capabilities)]
+      (observation/validate-snapshot
+       {:schema observation/schema
+        :family :bitcoin
+        :chain-id (str "bip122:" (subs genesis 0 32))
+        :identity identity
+        :health {:status (if (:network-active? runtime-capabilities)
+                           :ok :degraded)
+                 :peers (:connections runtime-capabilities)
+                 :warnings (:warnings runtime-capabilities)}
+        :sync {:syncing? (:initial-block-download? status)
+               :blocks (:blocks status)
+               :headers (:headers status)
+               :verification-progress (:verification-progress status)}
+        :tip {:height (:blocks status)
+              :hash (:best-block status)
+              :finality :best
+              :chainwork (:chainwork status)}
+        :finalized-tip nil
+        :capabilities
+        (cond-> #{:chain/identity :chain/health :chain/tip :account/read}
+          history? (conj :history/read))
+        :trust {:level :fully-validated
+                :source :bitcoin-core
+                :pruned? (:pruned? status)}}))))
 
 (defn backend
   ([configuration] (backend configuration http-transport))

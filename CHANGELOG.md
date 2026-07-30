@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-07-30
+
+- Implement the shared read-only `chain-observer` snapshot contract.
+- Identify Bitcoin networks with the CAIP-2 `bip122` genesis-hash prefix.
+- Preserve Bitcoin's probabilistic best-chain semantics instead of claiming a
+  deterministic finalized head.
+- Report local Bitcoin Core validation, sync, peers, warnings, and discovered
+  history capability through one validated observation.
+
 ## 0.2.0 — 2026-07-30
 
 - Bind a backend to an expected chain and genesis block.

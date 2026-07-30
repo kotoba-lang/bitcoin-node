@@ -2,6 +2,8 @@
   (:require [bitcoin.node.core :as core]
             [bitcoin.node.descriptor :as descriptor]
             [bitcoin.node.protocol :as node]
+            [chain.observer.contract :as observation]
+            [chain.observer.protocol :as chain-observer]
             [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]])
@@ -238,6 +240,40 @@
       (is (true? (get-in with-index [:block-filter-index :synced?])))
       (is (false? (:signing? with-index)))
       (is (false? (:broadcast? with-index))))))
+
+(deftest core-backend-implements-the-common-chain-observer
+  (with-redefs [core/credential
+                (fn [_] {:username "user" :password "secret"
+                         :source :test})]
+    (let [genesis
+          "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+          backend
+          (core/backend
+           (assoc config :expected-chain :main
+                  :expected-genesis-hash genesis)
+           (routed-transport
+            {"getblockchaininfo"
+             {:chain "main" :blocks 900000 :headers 900000
+              :bestblockhash "best" :chainwork "work"
+              :verificationprogress 1.0 :initialblockdownload false
+              :pruned false :size_on_disk 1}
+             ["getblockhash" [0]] genesis
+             "getnetworkinfo"
+             {:version 310100 :subversion "/Satoshi:31.1.0/"
+              :protocolversion 70016 :networkactive true
+              :connections 8 :warnings []}
+             "getindexinfo"
+             {(keyword "basic block filter index")
+              {:synced true :best_block_height 900000}}}))
+          snapshot (chain-observer/snapshot backend)]
+      (is (= observation/schema (:schema snapshot)))
+      (is (= :bitcoin (:family snapshot)))
+      (is (= "bip122:000000000019d6689c085ae165831e93"
+             (:chain-id snapshot)))
+      (is (= :best (get-in snapshot [:tip :finality])))
+      (is (= :fully-validated (get-in snapshot [:trust :level])))
+      (is (contains? (:capabilities snapshot) :history/read))
+      (is (observation/ready? snapshot)))))
 
 (deftest descriptor-scans-are-locally-serialized
   (with-redefs [core/credential
