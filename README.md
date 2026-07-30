@@ -25,11 +25,19 @@ v2 AssumeUTXO activation while retaining a separate fully validated background
 chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
 
-`bitcoin.node.disk-utxo` exposes the mainnet-scale SQLite UTXO host. It parses
-raw blocks, derives consensus Script flags, atomically commits touched
-outpoints plus undo, supports durable tip disconnect and integrity checks, and
-streams authenticated AssumeUTXO snapshots without materializing all coins.
-Header/fork selection remains owned by `bitcoin.node.consensus`.
+`bitcoin.node.disk-consensus` is the mainnet-scale embedded host. It validates
+headers and blocks, selects the most-work chain, and atomically commits the
+resulting UTXO delta, active-chain undo journals, and checksummed fork-choice
+metadata to one SQLite database. Header-only progress, side-chain blocks,
+multi-block reorganizations, and process restarts retain one consistent
+security boundary. Active block bodies are pruned from metadata after commit;
+a detached branch must be fetched again before a later reactivation.
+
+`bitcoin.node.disk-utxo` remains available as a lower-level linear-chain host.
+It parses raw blocks, derives consensus Script flags, atomically commits
+touched outpoints plus undo, supports durable tip disconnect and integrity
+checks, and streams authenticated AssumeUTXO snapshots without materializing
+all coins. Its caller owns header validation and fork selection.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
@@ -103,6 +111,27 @@ Embedded validation:
 (consensus/accept-background-block! embedded historical-raw-block unix-time)
 (consensus/consensus-status embedded)
 ```
+
+Atomic disk-backed validation:
+
+```clojure
+(require '[bitcoin.node.disk-consensus :as disk-consensus])
+
+(def durable
+  (disk-consensus/open
+   {:network :mainnet
+    :genesis-bytes raw-genesis-block
+    :path "data/mainnet-consensus.sqlite"}))
+
+(disk-consensus/accept-header! durable raw-80-byte-header unix-time)
+(disk-consensus/accept-block! durable raw-block unix-time)
+(disk-consensus/consensus-status durable)
+(disk-consensus/integrity-check! durable)
+```
+
+After the initial database is seeded, `genesis-bytes` may be omitted on
+restart. A populated legacy UTXO database without the matching atomic
+chainstate blob is rejected; it is never assigned inferred fork-choice state.
 
 An AssumeUTXO state reports `:snapshot-status :assumed` until background
 validation reaches the exact base and recomputes the pinned UTXO commitment.

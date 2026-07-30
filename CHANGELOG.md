@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 — 2026-07-30
+
+- Upgrade to `bitcoin-consensus` v0.7.0 for testnet4, default signet,
+  BIP94/BIP325 validation, and atomic host-state persistence.
+- Add `bitcoin.node.disk-consensus`, integrating validated headers,
+  cumulative-work fork choice, disk UTXO transitions, durable undo, and
+  checksummed restart state in one SQLite commit boundary.
+- Support header-only persistence and atomic multi-block reorganization.
+- Prune active block bodies and undo values from the metadata blob while
+  retaining side-chain block data until activation.
+- Fail closed when a populated lower-level UTXO database lacks its matching
+  consensus host state.
+
 ## 0.7.0 — 2026-07-30
 
 - Upgrade to `bitcoin-consensus` v0.6.1 with complete Core Script-vector

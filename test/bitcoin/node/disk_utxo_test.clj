@@ -40,5 +40,5 @@
          (:type
           (ex-data
            (try
-             (disk/open {:path "unused.sqlite" :network :signet})
+             (disk/open {:path "unused.sqlite" :network :unknown})
              (catch clojure.lang.ExceptionInfo error error)))))))
