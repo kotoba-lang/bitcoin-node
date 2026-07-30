@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-07-30
+
+- Upgrade the embedded kernel to `bitcoin-consensus` v0.3.0 for overflow-safe
+  unsigned wire decoding, block serialization, adversarial fuzz coverage, and
+  Bitcoin Core v31 differential verification.
+
 ## 0.4.0 — 2026-07-30
 
 - Integrate the separately versioned `bitcoin-consensus` v0.2.0 kernel.
