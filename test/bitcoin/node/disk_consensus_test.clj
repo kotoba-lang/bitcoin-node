@@ -3,6 +3,7 @@
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.sqlite-utxo :as sqlite]
+            [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.node.consensus :as consensus]
@@ -99,6 +100,43 @@
                  (disk/consensus-status reopened)))
           (is (disk/ready? reopened)))))))
 
+(deftest normalized-header-storage-keeps-host-state-compact-and-migrates
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            blocks (rest (reductions fixture/mine-regtest-block
+                                     genesis (range 1 26)))
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            _ (disk/accept-headers!
+               node (mapv #(get-in % [:header :bytes]) blocks)
+               2000000000)
+            backend (:backend node)
+            compact-bytes (sqlite/host-state backend)
+            compact (storage/decode-value compact-bytes)]
+        (is (= "bitcoin.node.disk-consensus.normalized.v1"
+               (:format compact)))
+        (is (nil? (get-in compact [:state :nodes])))
+        (is (= 26 (count (sqlite/header-nodes backend))))
+        (is (< (alength compact-bytes) 10000))
+        ;; A v0.12-era database is upgraded transactionally on next open.
+        (let [state @(:state node)
+              durable (sqlite/status backend)]
+          (sqlite/save-host-state!
+           backend (:tip durable) (:height durable) (storage/encode state))
+          (let [reopened (disk/open {:path path :network :regtest})
+                migrated
+                (storage/decode-value
+                 (sqlite/host-state (:backend reopened)))]
+            (is (= (disk/consensus-status node)
+                   (disk/consensus-status reopened)))
+            (is (= "bitcoin.node.disk-consensus.normalized.v1"
+                   (:format migrated)))
+            (is (= 26
+                   (count (sqlite/header-nodes (:backend reopened)))))))))))
+
 (deftest block-locator-is-dense-then-exponentially-backtracks-to-genesis
   (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
         blocks (rest (reductions fixture/mine-regtest-block genesis
@@ -145,6 +183,50 @@
                   (get-in block-1 [:header :hash])
                   (get-in genesis [:header :hash])]
                  (disk/block-locator @(:state reopened)))))))))
+
+(deftest multi-peer-disagreement-is-validated-and-resolved-by-local-work
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            main-1 (mine-branch-block genesis 1 0)
+            main-2 (mine-branch-block main-1 2 0)
+            side-1 (mine-branch-block genesis 1 1)
+            side-2 (mine-branch-block side-1 2 2)
+            side-3 (mine-branch-block side-2 3 3)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            locators (atom [])]
+        (with-redefs
+         [peer/connect!
+          (fn [{:keys [host]}]
+            {:id host :peer-version {:start-height 3}})
+          peer/close! (constantly nil)
+          peer/sync-headers!
+          (fn [connection locator accept-batch! _]
+            (swap! locators conj locator)
+            (let [headers
+                  (if (= "main" (:id connection))
+                    [(:header main-1) (:header main-2)]
+                    [(:header side-1) (:header side-2) (:header side-3)])]
+              (accept-batch! headers)
+              {:status :synced :batches 1 :accepted (count headers)
+               :locator (get-in (last headers) [:hash])}))]
+         (let [result
+               (disk/sync-headers-from-peers!
+                node [{:host "main"} {:host "side"}] 2000000000
+                {:required-successes 2})]
+           (is (true? (:disagreement? result)))
+           (is (= 2 (:successful-peers result)))
+           (is (= (get-in side-3 [:header :hash-hex])
+                  (:best-header (disk/consensus-status node))))
+           (is (= 3 (:best-header-height
+                     (disk/consensus-status node))))
+           (is (= (get-in genesis [:header :hash])
+                  (first (first @locators))))
+           (is (= (get-in main-2 [:header :hash])
+                  (first (second @locators))))))))))
 
 (deftest peer-block-sync-is-bounded-fully-validating-and-resumable
   (with-store

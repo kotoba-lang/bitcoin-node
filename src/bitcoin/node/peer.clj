@@ -4,6 +4,7 @@
   It performs version/verack, answers ping, and requests headers in protocol
   batches. Transaction relay, wallet, mempool, and mining commands are absent."
   (:require [bitcoin.consensus.codec :as codec]
+            [clojure.string :as str]
             [kotobase.bitcoin.protocol :as protocol])
   (:import [java.io DataInputStream DataOutputStream EOFException]
            [java.net InetSocketAddress Socket SocketTimeoutException]
@@ -18,7 +19,7 @@
 
 (defrecord PeerConnection
   [^Socket socket ^DataInputStream input ^DataOutputStream output
-   network magic peer-version]
+   network magic peer-version timeout-ms]
   java.io.Closeable
   (close [_] (.close socket)))
 
@@ -28,11 +29,37 @@
 (defn- fail! [type message data]
   (codec/fail! type message data))
 
-(defn- read-exactly [^DataInputStream input length]
+(defn- deadline-nanos [timeout-ms]
+  (+ (System/nanoTime) (* (long timeout-ms) 1000000)))
+
+(defn- set-read-timeout!
+  [connection deadline operation]
+  (let [remaining (- deadline (System/nanoTime))]
+    (when-not (pos? remaining)
+      (fail! :bitcoin.node/peer-timeout
+             "Bitcoin peer exceeded the overall request deadline."
+             {:operation operation}))
+    (.setSoTimeout
+     ^Socket (:socket connection)
+     (int (max 1 (quot (+ remaining 999999) 1000000))))))
+
+(defn- read-exactly-until
+  [connection deadline operation length]
   (let [bytes (byte-array length)]
     (try
-      (.readFully input bytes)
-      (mapv #(bit-and 0xff %) bytes)
+      (loop [offset 0]
+        (if (= offset length)
+          (mapv #(bit-and 0xff %) bytes)
+          (do
+            (set-read-timeout! connection deadline operation)
+            (let [read
+                  (.read ^DataInputStream (:input connection)
+                         bytes offset (- length offset))]
+              (if (neg? read)
+                (fail! :bitcoin.node/peer-eof
+                       "Bitcoin peer closed a partial message."
+                       {:expected length :received offset})
+                (recur (+ offset read)))))))
       (catch EOFException _
         (fail! :bitcoin.node/peer-eof
                "Bitcoin peer closed a partial message."
@@ -44,11 +71,12 @@
     (.write output (byte-array (map unchecked-byte message)))
     (.flush output)))
 
-(defn- read-message!
-  [^DataInputStream input expected-magic]
+(defn- read-message-until!
+  [connection deadline operation expected-magic]
   (let [header
         (protocol/decode-message-header
-         (read-exactly input protocol/header-size))
+         (read-exactly-until
+          connection deadline operation protocol/header-size))
         length (:length header)]
     (when-not (= expected-magic (:magic header))
       (fail! :bitcoin.node/peer-network-mismatch
@@ -58,7 +86,8 @@
       (fail! :bitcoin.node/peer-oversized-message
              "Bitcoin peer declared an oversized payload."
              {:length length :limit protocol/max-protocol-payload-bytes}))
-    (let [payload (read-exactly input length)]
+    (let [payload
+          (read-exactly-until connection deadline operation length)]
       (when-not (protocol/checksum-valid? header payload)
         (fail! :bitcoin.node/peer-checksum
                "Bitcoin peer message checksum is invalid."
@@ -100,7 +129,8 @@
              "Unsupported Bitcoin peer network." {:network network}))
     (let [{:keys [magic port]}
           (assoc base-config :port (or port (:port base-config)))]
-    (when-not (and (integer? timeout-ms) (pos? timeout-ms))
+    (when-not (and (integer? timeout-ms) (pos? timeout-ms)
+                   (<= timeout-ms Integer/MAX_VALUE))
       (fail! :bitcoin.node/peer-configuration
              "Peer timeout must be a positive integer."
              {:timeout-ms timeout-ms}))
@@ -113,7 +143,8 @@
         (let [input (DataInputStream. (.getInputStream socket))
               output (DataOutputStream. (.getOutputStream socket))
               base (->PeerConnection
-                    socket input output network magic nil)]
+                    socket input output network magic nil timeout-ms)
+              deadline (deadline-nanos timeout-ms)]
           (write-message!
            output magic "version"
            (protocol/encode-version-payload
@@ -131,7 +162,9 @@
                          {:minimum minimum-peer-version
                           :actual (:version peer-version)}))
                 (assoc base :peer-version peer-version))
-              (let [message (read-message! input magic)
+              (let [message
+                    (read-message-until!
+                     base deadline :handshake magic)
                     result (handle-control! base message)]
                 (cond
                   (and (vector? result) (= :version (first result)))
@@ -170,21 +203,24 @@
    (:output connection) (:magic connection) "getheaders"
    (protocol/encode-getheaders-payload
     {:locator-hashes locator-hashes}))
-  (try
-    (loop []
-      (let [message (read-message! (:input connection)
-                                   (:magic connection))
-            _ (handle-control! connection message)]
-        (if (= "headers" (:command message))
-          (protocol/decode-headers-payload (:payload message))
-          ;; Unknown announcements are deliberately ignored; this client never
-          ;; changes behavior based on inv/addr/feefilter traffic.
-          (recur))))
-    (catch SocketTimeoutException error
-      (throw
-       (ex-info "Bitcoin peer headers request timed out."
-                {:type :bitcoin.node/peer-timeout}
-                error)))))
+  (let [deadline (deadline-nanos (:timeout-ms connection))]
+    (try
+      (loop []
+        (let [message
+              (read-message-until!
+               connection deadline :headers (:magic connection))
+              _ (handle-control! connection message)]
+          (if (= "headers" (:command message))
+            (protocol/decode-headers-payload (:payload message))
+            ;; Unknown announcements are deliberately ignored; this client
+            ;; never changes behavior based on inv/addr/feefilter traffic.
+            (recur))))
+      (catch SocketTimeoutException error
+        (throw
+         (ex-info "Bitcoin peer headers request timed out."
+                  {:type :bitcoin.node/peer-timeout
+                   :operation :headers}
+                  error))))))
 
 (defn get-block!
   "Fetch one witness-capable raw block by its natural-order 32-byte hash.
@@ -204,38 +240,41 @@
      (protocol/encode-varint 1)
      (protocol/uint-le->bytes witness-block-inventory-type 4)
      block-hash)))
-  (try
-    (loop []
-      (let [message (read-message! (:input connection)
-                                   (:magic connection))
-            _ (handle-control! connection message)]
-        (case (:command message)
-          "block"
-          (let [payload (:payload message)]
-            (when (< (count payload) protocol/block-header-size)
-              (fail! :bitcoin.node/peer-malformed-block
-                     "Bitcoin peer returned a truncated block."
-                     {:length (count payload)}))
-            (let [actual
-                  (:hash
-                   (protocol/decode-block-header
-                    (subvec payload 0 protocol/block-header-size)))]
-              (when-not (= block-hash actual)
-                (fail! :bitcoin.node/peer-unrequested-block
-                       "Bitcoin peer returned a different block."
-                       {:requested block-hash :actual actual}))
-              payload))
+  (let [deadline (deadline-nanos (:timeout-ms connection))]
+    (try
+      (loop []
+        (let [message
+              (read-message-until!
+               connection deadline :block (:magic connection))
+              _ (handle-control! connection message)]
+          (case (:command message)
+            "block"
+            (let [payload (:payload message)]
+              (when (< (count payload) protocol/block-header-size)
+                (fail! :bitcoin.node/peer-malformed-block
+                       "Bitcoin peer returned a truncated block."
+                       {:length (count payload)}))
+              (let [actual
+                    (:hash
+                     (protocol/decode-block-header
+                      (subvec payload 0 protocol/block-header-size)))]
+                (when-not (= block-hash actual)
+                  (fail! :bitcoin.node/peer-unrequested-block
+                         "Bitcoin peer returned a different block."
+                         {:requested block-hash :actual actual}))
+                payload))
 
-          "notfound"
-          (fail! :bitcoin.node/peer-block-not-found
-                 "Bitcoin peer does not have the requested block." {})
+            "notfound"
+            (fail! :bitcoin.node/peer-block-not-found
+                   "Bitcoin peer does not have the requested block." {})
 
-          (recur))))
-    (catch SocketTimeoutException error
-      (throw
-       (ex-info "Bitcoin peer block request timed out."
-                {:type :bitcoin.node/peer-timeout}
-                error)))))
+            (recur))))
+      (catch SocketTimeoutException error
+        (throw
+         (ex-info "Bitcoin peer block request timed out."
+                  {:type :bitcoin.node/peer-timeout
+                   :operation :block}
+                  error))))))
 
 (defn sync-headers!
   "Drive sequential getheaders batches through a validating batch callback.
@@ -270,3 +309,103 @@
               (if (< count protocol/max-headers-per-message)
                 (assoc result :status :synced)
                 (recur [tip] (inc batches) (+ accepted count))))))))))
+
+(defn- peer-summary [configuration]
+  (let [network (or (:network configuration) :mainnet)]
+    {:host (:host configuration)
+     :port (or (:port configuration)
+               (get-in network-configuration [network :port]))
+     :network network}))
+
+(defn- failure-summary [configuration error]
+  {:peer (peer-summary configuration)
+   :type (or (:type (ex-data error)) :bitcoin.node/peer-error)
+   :message (.getMessage ^Throwable error)})
+
+(defn sync-headers-from-peers!
+  "Synchronize through a bounded, ordered peer set with durable failover.
+
+  `locator-fn` is called after each successful handshake, so a replacement
+  peer resumes from batches already validated and committed by an earlier
+  peer. `:required-successes` can be greater than one to compare independently
+  reported tips; differing reports are surfaced as `:disagreement?` while the
+  validating callback remains the sole fork-choice authority."
+  [peer-configurations locator-fn accept-batch!
+   {:keys [attempts-per-peer required-successes max-batches]
+    :or {attempts-per-peer 1 required-successes 1 max-batches 10000}}]
+  (let [peers (vec peer-configurations)]
+    (when-not (and (<= 1 (count peers) 32)
+                   (every? #(and (map? %)
+                                 (string? (:host %))
+                                 (not (str/blank? (:host %))))
+                           peers)
+                   (= (count peers)
+                      (count (into #{} (map peer-summary) peers))))
+      (fail! :bitcoin.node/peer-set
+             "Peer failover requires 1..32 unique configurations with explicit hosts."
+             {:count (count peers)}))
+    (when-not (and (ifn? locator-fn) (ifn? accept-batch!))
+      (fail! :bitcoin.node/peer-callback
+             "Peer failover requires locator and validation callbacks." {}))
+    (when-not (and (integer? attempts-per-peer)
+                   (<= 1 attempts-per-peer 8)
+                   (integer? required-successes)
+                   (<= 1 required-successes (count peers)))
+      (fail! :bitcoin.node/peer-configuration
+             "Peer attempts and required successes are outside their bounds."
+             {:attempts-per-peer attempts-per-peer
+              :required-successes required-successes
+              :peer-count (count peers)}))
+    (loop [remaining (vec (mapcat identity
+                                  (repeat attempts-per-peer peers)))
+           observations []
+           failures []]
+      (if-let [configuration (first remaining)]
+        (if (some #(= (peer-summary configuration) (:peer %))
+                  observations)
+          (recur (subvec remaining 1) observations failures)
+          (let [attempt
+                (try
+                  (let [connection (connect! configuration)]
+                    (try
+                      (let [result
+                            (sync-headers!
+                             connection (locator-fn) accept-batch!
+                             {:max-batches max-batches})
+                            tip (:locator result)]
+                        {:observation
+                         {:peer (peer-summary configuration)
+                          :start-height
+                          (get-in connection [:peer-version :start-height])
+                          :status (:status result)
+                          :batches (:batches result)
+                          :accepted (:accepted result)
+                          :reported-tip
+                          (when tip (protocol/natural-hash->hex tip))}})
+                      (finally
+                        (close! connection))))
+                  (catch Exception error
+                    {:failure (failure-summary configuration error)}))]
+            (if-let [observation (:observation attempt)]
+              (let [next-observations (conj observations observation)]
+                (if (= required-successes (count next-observations))
+                  (let [tips (into #{} (keep :reported-tip)
+                                   next-observations)]
+                    {:status (:status observation)
+                     :successful-peers (count next-observations)
+                     :attempted (+ (count next-observations)
+                                   (count failures))
+                     :disagreement? (> (count tips) 1)
+                     :observations next-observations
+                     :failures failures})
+                  (recur (subvec remaining 1)
+                         next-observations failures)))
+              (recur (subvec remaining 1) observations
+                     (conj failures (:failure attempt))))))
+        (fail! :bitcoin.node/peer-set-exhausted
+               "Every bounded peer synchronization attempt failed."
+               {:attempted (+ (count observations) (count failures))
+                :successful-peers (count observations)
+                :required-successes required-successes
+                :observations observations
+                :failures failures})))))

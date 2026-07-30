@@ -46,6 +46,56 @@
 (defn- fail! [type message data]
   (codec/fail! type message data))
 
+(def ^:private normalized-host-format
+  "bitcoin.node.disk-consensus.normalized.v1")
+
+(defn- node-data [nodes]
+  (into {}
+        (keep
+         (fn [[hash node]]
+           (let [data (cond-> {}
+                        (some? (:block node)) (assoc :block (:block node))
+                        (some? (:undo node)) (assoc :undo (:undo node)))]
+             (when (seq data) [hash data]))))
+        nodes))
+
+(defn- encode-host-state [state]
+  (storage/encode-value
+   {:format normalized-host-format
+    :state (dissoc state :nodes)
+    :node-data (node-data (:nodes state))}))
+
+(defn- selected-nodes [state hashes]
+  (mapv #(get-in state [:nodes %]) (distinct hashes)))
+
+(defn- decode-normalized-host-state
+  [backend value network]
+  (let [nodes (sqlite/header-nodes backend)
+        extras (:node-data value)
+        merged
+        (reduce-kv
+         (fn [result hash data]
+           (when-not (contains? result hash)
+             (fail! :bitcoin.node/missing-normalized-header
+                    "Host node data references a missing normalized header."
+                    {:hash hash}))
+           (update result hash merge data))
+         nodes extras)
+        state (assoc (:state value) :nodes merged)]
+    (storage/validate!
+     (assoc state :format storage/format-version) network)))
+
+(defn- load-or-migrate-host-state!
+  [backend bytes network durable]
+  (let [value (storage/decode-value bytes)]
+    (if (= normalized-host-format (:format value))
+      (decode-normalized-host-state backend value network)
+      (let [legacy (storage/validate! value network)]
+        (sqlite/save-host-and-headers!
+         backend (:tip durable) (:height durable)
+         (encode-host-state legacy) (vals (:nodes legacy)))
+        legacy))))
+
 (defn- validate-durable-tip!
   [state durable]
   (let [tip (:active-tip state)
@@ -85,7 +135,8 @@
             :height 0
             :previous-height -1
             :undo (:undo genesis-node)}]
-          :host-state-bytes (storage/encode durable)})
+          :header-nodes [genesis-node]
+          :host-state-bytes (encode-host-state durable)})
         durable)
       (catch Throwable error
         (sqlite/rollback! view)
@@ -122,7 +173,10 @@
               coin-count (get-in loaded [:snapshot :coins-count])
               durable (strip-active-data activated coin-count)]
           (vreset! result durable)
-          (storage/encode durable)))))
+          (encode-host-state durable)))
+      :header-nodes-fn
+      (fn [_loaded]
+        (vals (:nodes @result)))))
     @result))
 
 (defn- open-single
@@ -146,7 +200,10 @@
         initial
         (cond
           bytes
-          (validate-durable-tip! (storage/decode bytes network) durable)
+          (validate-durable-tip!
+           (load-or-migrate-host-state!
+            backend bytes network durable)
+           durable)
 
           (and (= -1 (:height durable)) snapshot-source)
           (do
@@ -272,17 +329,18 @@
   [node raw-headers now]
   (locking node
     (let [before @(:state node)
+          parsed
+          (mapv #(header/decode-block-header (vec %)) raw-headers)
           after
           (chainstate/accept-headers
-           before
-           (mapv #(header/decode-block-header (vec %)) raw-headers)
-           now)
+           before parsed now)
           durable (sqlite/status (:backend node))
           stripped (strip-active-data after (:coin-count durable))]
       (validate-durable-tip! before durable)
-      (sqlite/save-host-state!
+      (sqlite/save-host-and-headers!
        (:backend node) (:tip durable) (:height durable)
-       (storage/encode stripped))
+       (encode-host-state stripped)
+       (selected-nodes stripped (map :hash-hex parsed)))
       (reset! (:state node) stripped)
       (consensus-status node))))
 
@@ -330,6 +388,21 @@
       connection locator
       #(accept-headers! node (mapv :bytes %) now)
       options))))
+
+(defn sync-headers-from-peers!
+  "Synchronize from a bounded peer set, resuming from every durable batch.
+
+  A failed or invalid peer cannot roll back accepted work. With
+  `:required-successes` greater than one, competing reports are retained for
+  operator visibility while consensus most-work selection remains local."
+  ([node peer-configurations now]
+   (sync-headers-from-peers! node peer-configurations now {}))
+  ([node peer-configurations now options]
+   (peer/sync-headers-from-peers!
+    peer-configurations
+    #(block-locator @(:state node))
+    #(accept-headers! node (mapv :bytes %) now)
+    options)))
 
 (declare accept-block!)
 
@@ -419,9 +492,10 @@
                 (assoc-in [:nodes base :block-valid?] true)
                 (assoc-in [:nodes base :scripts-checked?] true)
                 (strip-active-data (:coin-count foreground-status)))]
-        (sqlite/save-host-state!
+        (sqlite/save-host-and-headers!
          (:backend node) (:tip foreground-status)
-         (:height foreground-status) (storage/encode promoted))
+         (:height foreground-status) (encode-host-state promoted)
+         (selected-nodes promoted [base]))
         (reset! (:state node) promoted)
         promoted))))
 
@@ -482,6 +556,7 @@
       (try
         (let [hydrated (assoc-in before [:utxo :coins] view)
               parsed (block/parse raw-block)
+              parsed-hash (get-in parsed [:header :hash-hex])
               after
               (chainstate/accept-block
                hydrated parsed now (:verify-script node)
@@ -501,12 +576,16 @@
                 :new-height (chainstate/active-height after)
                 :detach detach
                 :attach (mapv #(attachment after %) attach)
-                :host-state-bytes (storage/encode stripped)}))
+                :header-nodes
+                (selected-nodes stripped
+                                (concat [parsed-hash] detach attach))
+                :host-state-bytes (encode-host-state stripped)}))
             (do
               (sqlite/rollback! view)
-              (sqlite/save-host-state!
+              (sqlite/save-host-and-headers!
                backend (:tip durable-before) (:height durable-before)
-               (storage/encode stripped))))
+               (encode-host-state stripped)
+               (selected-nodes stripped [parsed-hash]))))
           (reset! (:state node) stripped)
           (consensus-status node))
         (catch Throwable error

@@ -40,17 +40,17 @@
                         input (DataInputStream. (.getInputStream socket))
                         output (DataOutputStream. (.getOutputStream socket))]
               (is (= "version" (:command (read-message input))))
-              (send-raw! output frame)))]
-      (let [type
-            (:type
-             (ex-data
-              (try
-                (peer/connect!
-                 {:host "127.0.0.1" :port (.getLocalPort server)
-                  :network :regtest :timeout-ms 5000})
-                (catch clojure.lang.ExceptionInfo error error))))]
-        @served
-        type))))
+              (send-raw! output frame)))
+          type
+          (:type
+           (ex-data
+            (try
+              (peer/connect!
+               {:host "127.0.0.1" :port (.getLocalPort server)
+                :network :regtest :timeout-ms 5000})
+              (catch clojure.lang.ExceptionInfo error error))))]
+      @served
+      type)))
 
 (deftest jvm-peer-handshake-ping-and-getheaders-round-trip
   (with-open [server (ServerSocket. 0)]
@@ -151,6 +151,49 @@
                  (catch clojure.lang.ExceptionInfo error error))))))
       @served)))
 
+(deftest control-traffic-cannot-extend-an-overall-request-deadline
+  (with-open [server (ServerSocket. 0)]
+    (let [magic (get-in peer/network-configuration [:regtest :magic])
+          served
+          (future
+            (try
+              (with-open [^Socket socket (.accept server)
+                          input (DataInputStream. (.getInputStream socket))
+                          output (DataOutputStream. (.getOutputStream socket))]
+                (is (= "version" (:command (read-message input))))
+                (send-message!
+                 output magic "version"
+                 (protocol/encode-version-payload
+                  {:timestamp 1 :nonce 2 :start-height 1}))
+                (send-message! output magic "verack" [])
+                (is (= "verack" (:command (read-message input))))
+                (is (= "getheaders" (:command (read-message input))))
+                (dotimes [nonce 20]
+                  (send-message!
+                   output magic "ping"
+                   (protocol/encode-ping-payload nonce))
+                  (Thread/sleep 50)))
+              (catch Throwable _ :client-closed)))
+          connection
+          (peer/connect!
+           {:host "127.0.0.1" :port (.getLocalPort server)
+            :network :regtest :timeout-ms 500})
+          started (System/nanoTime)]
+      (try
+        (let [failure
+              (try
+                (peer/get-headers!
+                 connection [(vec (repeat 32 0))])
+                (catch clojure.lang.ExceptionInfo error error))
+              elapsed-ms (/ (- (System/nanoTime) started) 1e6)]
+          (is (= :bitcoin.node/peer-timeout
+                 (:type (ex-data failure))))
+          (is (= :headers (:operation (ex-data failure))))
+          (is (< elapsed-ms 1500.0)))
+        (finally
+          (peer/close! connection)))
+      @served)))
+
 (deftest malformed-peer-framing-fails-closed
   (let [regtest-magic (get-in peer/network-configuration [:regtest :magic])
         mainnet-magic (get-in peer/network-configuration [:mainnet :magic])
@@ -196,3 +239,72 @@
            (try
              (peer/get-block! {} [])
              (catch clojure.lang.ExceptionInfo error error)))))))
+
+(deftest bounded-peer-set-fails-over-and-resumes-from-current-locator
+  (let [locators (atom [])
+        closed (atom [])
+        tip (vec (repeat 32 7))]
+    (with-redefs
+     [peer/connect!
+      (fn [{:keys [host]}]
+        (if (= host "unreachable")
+          (throw (ex-info "offline" {:type :test/offline}))
+          {:id host :peer-version {:start-height 42}}))
+      peer/close! #(swap! closed conj (:id %))
+      peer/sync-headers!
+      (fn [_ locator _ options]
+        (swap! locators conj locator)
+        (is (= {:max-batches 3} options))
+        {:status :synced :batches 1 :accepted 2 :locator tip})]
+     (let [result
+           (peer/sync-headers-from-peers!
+            [{:host "unreachable" :network :regtest}
+             {:host "healthy" :network :regtest}]
+            #(vec (repeat 1 (vec (repeat 32 1))))
+            (constantly nil)
+            {:max-batches 3})]
+       (is (= :synced (:status result)))
+       (is (= 1 (:successful-peers result)))
+       (is (= 2 (:attempted result)))
+       (is (= :test/offline (get-in result [:failures 0 :type])))
+       (is (= [42] (mapv :start-height (:observations result))))
+       (is (= ["healthy"] @closed))
+       (is (= 1 (count @locators)))))))
+
+(deftest multiple-successful-peers-surface-chain-disagreement
+  (let [next-tip (atom 0)]
+    (with-redefs
+     [peer/connect!
+      (fn [{:keys [host]}]
+        {:id host :peer-version {:start-height 2}})
+      peer/close! (constantly nil)
+      peer/sync-headers!
+      (fn [_ _ _ _]
+        (let [byte (swap! next-tip inc)]
+          {:status :synced :batches 1 :accepted 1
+           :locator (vec (repeat 32 byte))}))]
+     (let [result
+           (peer/sync-headers-from-peers!
+            [{:host "peer-a"} {:host "peer-b"}]
+            #(vector (vec (repeat 32 0)))
+            (constantly nil)
+            {:required-successes 2})]
+       (is (= 2 (:successful-peers result)))
+       (is (true? (:disagreement? result)))
+       (is (= 2 (count (:observations result))))))))
+
+(deftest exhausted-peer-set-preserves-typed-failure-evidence
+  (with-redefs
+   [peer/connect!
+    (fn [{:keys [host]}]
+      (throw (ex-info host {:type :test/rejected})))]
+   (let [failure
+         (try
+           (peer/sync-headers-from-peers!
+            [{:host "a"} {:host "b"}]
+            (constantly [(vec (repeat 32 0))])
+            (constantly nil) {})
+           (catch clojure.lang.ExceptionInfo error error))]
+     (is (= :bitcoin.node/peer-set-exhausted
+            (:type (ex-data failure))))
+     (is (= 2 (count (:failures (ex-data failure))))))))

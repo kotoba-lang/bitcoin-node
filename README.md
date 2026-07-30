@@ -42,14 +42,17 @@ all coins. Its caller owns header validation and fork selection.
 `bitcoin.node.peer` adds a bounded, read-only JVM P2P transport for
 mainnet, testnet3, testnet4, signet, and regtest. It performs version/verack,
 answers ping, verifies network magic and checksums before decoding bounded
-payloads, and retrieves headers in protocol-sized batches. The disk host
-builds a sparse Bitcoin-style block locator, validates every returned header,
-and commits each batch atomically, so synchronization resumes after restart
-and can find a common ancestor after a reorganization. It deliberately has no
-transaction relay, mempool, wallet, signing, or mining commands. Retained
-blocks can be requested individually with witness data; the response header
-must match the requested hash before the raw block is returned to the full
-consensus validator.
+payloads, enforces an overall monotonic deadline even during control traffic
+or partial frames, and retrieves headers in protocol-sized batches. The disk
+host builds a sparse Bitcoin-style block locator, validates every returned
+header, and commits each batch atomically, so synchronization resumes after
+restart and can find a common ancestor after a reorganization. A bounded peer
+set fails over from the latest durable locator, records typed failure evidence,
+and can compare independently reported tips; only local validation and exact
+most-work fork choice select state. It deliberately has no transaction relay,
+mempool, wallet, signing, or mining commands. Retained blocks can be requested
+individually with witness data; the response header must match the requested
+hash before the raw block is returned to the full consensus validator.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits

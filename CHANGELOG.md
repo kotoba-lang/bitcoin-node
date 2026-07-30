@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.0 — 2026-07-30
+
+- Replace the growing monolithic header-state blob with compact checksummed
+  host metadata plus fixed-length normalized header nodes, including atomic
+  legacy migration and durable restart from every accepted batch.
+- Add bounded multi-peer header failover, retry evidence, optional independent
+  tip comparison, and local most-work resolution of competing valid branches.
+- Enforce monotonic overall handshake/header/block deadlines, including while
+  a peer sends control traffic or trickles a partial frame.
+- Extend disk integrity checks through every raw header hash, parent link,
+  height, and exact cumulative-work value.
+
 ## 0.12.0 — 2026-07-30
 
 - Add bounded best-chain block synchronization from P2P retrieval through
