@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.0 — 2026-07-30
+
+- Add bounded concurrent discovery from the Bitcoin Core DNS seed set while
+  rejecting private, loopback, link-local, multicast, and non-IPv4 answers.
+- Add health-aware peer rotation with latency history, typed failure evidence,
+  exponential cooldown, and extended quarantine for protocol violations.
+- Persist bounded peer health in checksummed, atomically replaced snapshots,
+  including selection history when synchronization exits unexpectedly.
+- Integrate managed failover with the durable disk consensus host without
+  making discovery or peer reputation part of consensus.
+
 ## 0.13.0 — 2026-07-30
 
 - Replace the growing monolithic header-state blob with compact checksummed

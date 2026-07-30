@@ -317,10 +317,11 @@
                (get-in network-configuration [network :port]))
      :network network}))
 
-(defn- failure-summary [configuration error]
+(defn- failure-summary [configuration error elapsed-ms]
   {:peer (peer-summary configuration)
    :type (or (:type (ex-data error)) :bitcoin.node/peer-error)
-   :message (.getMessage ^Throwable error)})
+   :message (.getMessage ^Throwable error)
+   :elapsed-ms elapsed-ms})
 
 (defn sync-headers-from-peers!
   "Synchronize through a bounded, ordered peer set with durable failover.
@@ -364,7 +365,10 @@
         (if (some #(= (peer-summary configuration) (:peer %))
                   observations)
           (recur (subvec remaining 1) observations failures)
-          (let [attempt
+          (let [started (System/nanoTime)
+                elapsed-ms
+                #(/ (- (System/nanoTime) started) 1e6)
+                attempt
                 (try
                   (let [connection (connect! configuration)]
                     (try
@@ -380,12 +384,15 @@
                           :status (:status result)
                           :batches (:batches result)
                           :accepted (:accepted result)
+                          :elapsed-ms (elapsed-ms)
                           :reported-tip
                           (when tip (protocol/natural-hash->hex tip))}})
                       (finally
                         (close! connection))))
                   (catch Exception error
-                    {:failure (failure-summary configuration error)}))]
+                    {:failure
+                     (failure-summary
+                      configuration error (elapsed-ms))}))]
             (if-let [observation (:observation attempt)]
               (let [next-observations (conj observations observation)]
                 (if (= required-successes (count next-observations))

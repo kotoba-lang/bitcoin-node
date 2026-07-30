@@ -54,6 +54,16 @@ mempool, wallet, signing, or mining commands. Retained blocks can be requested
 individually with witness data; the response header must match the requested
 hash before the raw block is returned to the full consensus validator.
 
+`bitcoin.node.peer-pool` bootstraps bounded public IPv4 candidates from the
+Bitcoin Core DNS seed set, then rotates peers using local success, failure,
+latency, and exponential-cooldown history. DNS is discovery only: every peer
+must still complete the authenticated network handshake and all downloaded
+data crosses the same local consensus boundary. Pool snapshots are bounded,
+checksummed, and atomically replaced so health history survives process
+restarts without becoming consensus input. Only globally routed IPv4 unicast
+answers are accepted; local, CGNAT, documentation, benchmark, multicast, and
+reserved ranges are excluded.
+
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
 response size, correlates JSON-RPC IDs, and allows only:
@@ -153,10 +163,35 @@ Direct header synchronization:
             (peer/connect! {:host "127.0.0.1" :network :mainnet
                             :timeout-ms 30000})]
   (disk-consensus/sync-headers!
-   durable connection unix-time {:max-batches 500})
+    durable connection unix-time {:max-batches 500})
   (disk-consensus/sync-blocks!
    durable connection unix-time {:max-blocks 128}))
 ```
+
+Managed discovery, failover, and durable peer health:
+
+```clojure
+(require '[bitcoin.node.peer-pool :as peer-pool])
+
+(def peers
+  (atom
+   (peer-pool/create
+    (peer-pool/discover-dns!
+     :mainnet {:timeout-ms 5000 :maximum-results 64}))))
+
+(disk-consensus/sync-headers-managed!
+ durable peers unix-time
+ {:maximum-peers 8
+  :max-batches 500
+  :pool-path "data/mainnet-peers.edn"})
+
+(peer-pool/status @peers (System/currentTimeMillis))
+```
+
+Applications should retain explicit operator peers as additional candidates
+and periodically rediscover when the eligible pool is depleted. A DNS answer
+is never treated as identity, finality, chain state, or a reason to bypass
+proof-of-work, difficulty, timestamp, or block validation.
 
 Block synchronization walks only unvalidated members of the most-work header
 chain, oldest first. Each block is fully validated and committed separately;

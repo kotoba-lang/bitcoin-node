@@ -13,6 +13,7 @@
             [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.node.peer :as peer]
+            [bitcoin.node.peer-pool :as peer-pool]
             [kotobase.bitcoin.protocol :as header]))
 
 (defrecord DiskConsensusNode
@@ -400,6 +401,17 @@
   ([node peer-configurations now options]
    (peer/sync-headers-from-peers!
     peer-configurations
+    #(block-locator @(:state node))
+    #(accept-headers! node (mapv :bytes %) now)
+    options)))
+
+(defn sync-headers-managed!
+  "Synchronize through a health-scored peer pool with cooldown and rotation."
+  ([node pool-atom now]
+   (sync-headers-managed! node pool-atom now {}))
+  ([node pool-atom now options]
+   (peer-pool/sync-headers!
+    pool-atom
     #(block-locator @(:state node))
     #(accept-headers! node (mapv :bytes %) now)
     options)))
