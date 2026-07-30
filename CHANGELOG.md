@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0 — 2026-07-30
+
+- Upgrade to `bitcoin-consensus` v0.12.0, whose SQLite transition boundary is
+  verified across 13 hard-process crash points and a 256-block reversible
+  restart soak.
+
 ## 0.17.0 — 2026-07-30
 
 - Select eligible peers across distinct public IPv4 /16 groups before reusing
