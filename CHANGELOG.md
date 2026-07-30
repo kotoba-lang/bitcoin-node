@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.15.0 — 2026-07-30
+
+- Replace eager normalized-header materialization with a map-compatible lazy
+  SQLite index, immutable write overlay, and shared bounded LRU cache.
+- Persist a bounded restart-ready block locator and incrementally age its
+  ancestry, eliminating full-chain walks from normal peer synchronization.
+- Preserve hot ancestor context across atomic batch commits and reduce
+  transition-path derivation from full-chain traversal to reorganization
+  depth.
+- Upgrade normalized v1 host metadata transactionally on first open; all
+  subsequent v2 restarts use bounded point lookups.
+- Upgrade to `bitcoin-consensus` v0.10.1 for normalized-header point lookup,
+  row counts, and bounded temporary-index full-graph audits.
+
 ## 0.14.0 — 2026-07-30
 
 - Add bounded concurrent discovery from the Bitcoin Core DNS seed set while

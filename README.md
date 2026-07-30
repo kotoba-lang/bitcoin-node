@@ -32,6 +32,12 @@ metadata to one SQLite database. Header-only progress, side-chain blocks,
 multi-block reorganizations, and process restarts retain one consistent
 security boundary. Active block bodies are pruned from metadata after commit;
 a detached branch must be fetched again before a later reactivation.
+Normalized headers are exposed through an immutable lazy map with a bounded
+LRU and write overlay, so normal restart reads only compact host metadata plus
+the active and best tips. A bounded block locator is persisted with that
+metadata and advanced incrementally instead of walking every ancestor before
+each peer request. Databases using normalized host format v1 perform one
+transactional full-index migration; subsequent v2 opens remain bounded.
 
 `bitcoin.node.disk-utxo` remains available as a lower-level linear-chain host.
 It parses raw blocks, derives consensus Script flags, atomically commits

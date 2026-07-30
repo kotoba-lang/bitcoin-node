@@ -12,6 +12,7 @@
             [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.utxo :as utxo]
+            [bitcoin.node.lazy-header-map :as lazy-header-map]
             [bitcoin.node.peer :as peer]
             [bitcoin.node.peer-pool :as peer-pool]
             [kotobase.bitcoin.protocol :as header]))
@@ -24,31 +25,45 @@
 (defn- disk-coins [coin-count]
   {disk-coins-key true :coin-count coin-count})
 
+(declare overlay-or-all)
+
 (defn- strip-active-data
   [state coin-count]
-  (let [active
-        (loop [hash (:active-tip state) result #{}]
-          (if hash
-            (recur (get-in state [:nodes hash :parent])
-                   (conj result hash))
-            result))]
-    (-> state
-        (assoc-in [:utxo :coins] (disk-coins coin-count))
-        (update
-         :nodes
-         (fn [nodes]
-           (reduce
-            (fn [result hash]
-              (-> result
-                  (assoc-in [hash :block] nil)
-                  (assoc-in [hash :undo] nil)))
-            nodes active))))))
+  (-> state
+      (assoc-in [:utxo :coins] (disk-coins coin-count))
+      (update
+       :nodes
+       (fn [nodes]
+         ;; Durable normalized rows already contain no block body or undo.
+         ;; Only the immutable overlay can have acquired either during the
+         ;; current transition, so a lazy index never walks the full chain.
+         (reduce-kv
+          (fn [result hash node]
+            (if (and (:active? node)
+                     (or (some? (:block node)) (some? (:undo node))))
+              (assoc result hash (assoc node :block nil :undo nil))
+              result))
+          nodes
+          (overlay-or-all nodes))))))
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
 
 (def ^:private normalized-host-format
+  "bitcoin.node.disk-consensus.normalized.v2")
+
+(def ^:private legacy-normalized-host-format
   "bitcoin.node.disk-consensus.normalized.v1")
+
+(def ^:private header-cache-size 8192)
+(def ^:private locator-key ::block-locator)
+
+(declare advance-locator computed-block-locator)
+
+(defn- overlay-or-all [nodes]
+  (if (lazy-header-map/lazy-header-map? nodes)
+    (lazy-header-map/overlay-entries nodes)
+    nodes))
 
 (defn- node-data [nodes]
   (into {}
@@ -58,18 +73,84 @@
                         (some? (:block node)) (assoc :block (:block node))
                         (some? (:undo node)) (assoc :undo (:undo node)))]
              (when (seq data) [hash data]))))
-        nodes))
+        (overlay-or-all nodes)))
 
 (defn- encode-host-state [state]
-  (storage/encode-value
-   {:format normalized-host-format
-    :state (dissoc state :nodes)
-    :node-data (node-data (:nodes state))}))
+  (let [state
+        (if (get state locator-key)
+          state
+          (assoc state locator-key (computed-block-locator state)))]
+    (storage/encode-value
+     {:format normalized-host-format
+      :state (dissoc state :nodes)
+      :node-data (node-data (:nodes state))})))
 
 (defn- selected-nodes [state hashes]
   (mapv #(get-in state [:nodes %]) (distinct hashes)))
 
+(defn- lazy-nodes
+  [backend extras]
+  (let [overlay
+        (reduce-kv
+         (fn [result hash data]
+           (if-let [node (sqlite/header-node backend hash)]
+             (assoc result hash (merge node data))
+             (fail! :bitcoin.node/missing-normalized-header
+                    "Host node data references a missing normalized header."
+                    {:hash hash})))
+         {} extras)]
+    (lazy-header-map/create
+     #(when (string? %) (sqlite/header-node backend %))
+     #(sqlite/header-nodes backend)
+     {:cache-size header-cache-size :overlay overlay})))
+
+(defn- validate-normalized-state!
+  [state network]
+  (let [tip-hash (:active-tip state)
+        best-hash (:best-header state)
+        tip (get-in state [:nodes tip-hash])
+        best (get-in state [:nodes best-hash])
+        locator (get state locator-key)]
+    (when-not (= network (:network state))
+      (fail! :bitcoin.consensus/chainstate-network-mismatch
+             "Chainstate belongs to a different Bitcoin network."
+             {:expected network :actual (:network state)}))
+    (when-not (and (map? (:consensus state))
+                   (map? (:utxo state))
+                   (string? tip-hash)
+                   (string? best-hash)
+                   tip best
+                   (true? (:active? tip))
+                   (true? (:header-valid? best))
+                   (vector? locator)
+                   (<= 1 (count locator) 64)
+                   (every? #(and (vector? %) (= 32 (count %))) locator)
+                   (= (get-in best [:header :hash]) (first locator)))
+      (fail! :bitcoin.consensus/corrupt-chainstate
+             "Compact host metadata references invalid normalized headers."
+             {:active-tip tip-hash :best-header best-hash}))
+    (when (pos? (compare (:chainwork tip) (:chainwork best)))
+      (fail! :bitcoin.consensus/corrupt-chainstate
+             "Best header has less work than the active tip."
+             {:active-tip tip-hash :best-header best-hash}))
+    (when-not (= (:height tip) (get-in state [:utxo :height]))
+      (fail! :bitcoin.consensus/corrupt-chainstate
+             "UTXO height differs from the active tip height."
+             {:tip-height (:height tip)
+              :utxo-height (get-in state [:utxo :height])}))
+    state))
+
 (defn- decode-normalized-host-state
+  [backend value network]
+  (let [extras (:node-data value)]
+    (when-not (map? extras)
+      (fail! :bitcoin.consensus/corrupt-chainstate
+             "Compact host node data is malformed." {}))
+    (validate-normalized-state!
+     (assoc (:state value) :nodes (lazy-nodes backend extras))
+     network)))
+
+(defn- decode-legacy-normalized-state
   [backend value network]
   (let [nodes (sqlite/header-nodes backend)
         extras (:node-data value)
@@ -81,21 +162,56 @@
                     "Host node data references a missing normalized header."
                     {:hash hash}))
            (update result hash merge data))
-         nodes extras)
-        state (assoc (:state value) :nodes merged)]
+         nodes extras)]
     (storage/validate!
-     (assoc state :format storage/format-version) network)))
+     (assoc (:state value)
+            :nodes merged
+            :format storage/format-version)
+     network)))
+
+(defn- compact-state [backend state]
+  (let [state
+        (if (get state locator-key)
+          state
+          (assoc state locator-key (computed-block-locator state)))
+        nodes (:nodes state)
+        extras (node-data nodes)]
+    (assoc
+     state :nodes
+     (if (lazy-header-map/lazy-header-map? nodes)
+       (lazy-header-map/rebase
+        nodes
+        (into {}
+              (map
+               (fn [[hash data]]
+                 [hash (merge (get nodes hash) data)]))
+              extras))
+       (lazy-nodes backend extras)))))
 
 (defn- load-or-migrate-host-state!
   [backend bytes network durable]
   (let [value (storage/decode-value bytes)]
-    (if (= normalized-host-format (:format value))
+    (cond
+      (= normalized-host-format (:format value))
       (decode-normalized-host-state backend value network)
-      (let [legacy (storage/validate! value network)]
+
+      (= legacy-normalized-host-format (:format value))
+      (let [legacy (decode-legacy-normalized-state backend value network)
+            upgraded
+            (assoc legacy locator-key (computed-block-locator legacy))]
+        (sqlite/save-host-state!
+         backend (:tip durable) (:height durable)
+         (encode-host-state upgraded))
+        upgraded)
+
+      :else
+      (let [legacy (storage/validate! value network)
+            upgraded
+            (assoc legacy locator-key (computed-block-locator legacy))]
         (sqlite/save-host-and-headers!
          backend (:tip durable) (:height durable)
-         (encode-host-state legacy) (vals (:nodes legacy)))
-        legacy))))
+         (encode-host-state upgraded) (vals (:nodes upgraded)))
+        upgraded))))
 
 (defn- validate-durable-tip!
   [state durable]
@@ -233,7 +349,10 @@
                  {:network network :height (:height durable)
                   :tip (:tip durable)}))]
     (->DiskConsensusNode
-     (atom initial) backend verify-script network nil)))
+     (atom (if (lazy-header-map/lazy-header-map? (:nodes initial))
+             initial
+             (compact-state backend initial)))
+     backend verify-script network nil)))
 
 (defn- header-genesis-bytes [header-state]
   (when header-state
@@ -333,8 +452,10 @@
           parsed
           (mapv #(header/decode-block-header (vec %)) raw-headers)
           after
-          (chainstate/accept-headers
-           before parsed now)
+          (advance-locator
+           before
+           (chainstate/accept-headers
+            before parsed now))
           durable (sqlite/status (:backend node))
           stripped (strip-active-data after (:coin-count durable))]
       (validate-durable-tip! before durable)
@@ -342,17 +463,10 @@
        (:backend node) (:tip durable) (:height durable)
        (encode-host-state stripped)
        (selected-nodes stripped (map :hash-hex parsed)))
-      (reset! (:state node) stripped)
+      (reset! (:state node) (compact-state (:backend node) stripped))
       (consensus-status node))))
 
-(defn block-locator
-  "Build a Bitcoin Core-style locator from the best validated header.
-
-  The ten newest entries are consecutive, then the walk doubles its step
-  until genesis. This lets a peer find a common ancestor after deep reorgs
-  and makes restart synchronization independent of the peer that supplied
-  the previous tip."
-  [state]
+(defn- computed-block-locator [state]
   (loop [hash (:best-header state)
          step 1
          entries 0
@@ -377,6 +491,50 @@
                     (recur (get-in state [:nodes current :parent])
                            (dec remaining))))]
             (recur ancestor step' (inc entries) locator')))))))
+
+(defn- bounded-locator [values]
+  (loop [values (vec (distinct values))]
+    (if (<= (count values) 64)
+      values
+      (let [genesis (peek values)
+            reduced
+            (vec
+             (distinct
+              (concat (take 10 values)
+                      (take-nth 2 (drop 10 values))
+                      [genesis])))]
+        (recur reduced)))))
+
+(defn- advance-locator [before after]
+  (if (= (:best-header before) (:best-header after))
+    after
+    (let [recent
+          (loop [hash (:best-header after) remaining 10 result []]
+            (if (or (nil? hash) (zero? remaining))
+              result
+              (let [node (get-in after [:nodes hash])]
+                (when-not node
+                  (fail! :bitcoin.node/missing-header-node
+                         "Best-header ancestry is incomplete."
+                         {:hash hash}))
+                (recur (:parent node) (dec remaining)
+                       (conj result (get-in node [:header :hash]))))))
+          previous
+          (or (get before locator-key)
+              (computed-block-locator before))]
+      (assoc after locator-key
+             (bounded-locator (concat recent previous))))))
+
+(defn block-locator
+  "Return a bounded durable locator for the best validated header.
+
+  The initial migration computes the Core-style sparse ancestry once.
+  Subsequent batches prepend their ten newest hashes and exponentially age
+  older entries, preserving a restart-ready common-ancestor search without
+  walking the full chain."
+  [state]
+  (or (get state locator-key)
+      (computed-block-locator state)))
 
 (defn sync-headers!
   "Synchronize validated P2P header batches into this disk consensus node."
@@ -460,19 +618,32 @@
         :more? more?
         :consensus (consensus-status node)}))))
 
-(defn- path-to-root [state tip]
-  (loop [hash tip result []]
-    (if hash
-      (recur (get-in state [:nodes hash :parent]) (conj result hash))
-      result)))
-
 (defn- transition-paths [before after]
-  (let [old-path (path-to-root before (:active-tip before))
-        new-path (path-to-root after (:active-tip after))
-        new-hashes (set new-path)
-        fork (first (filter new-hashes old-path))]
-    {:detach (vec (take-while #(not= fork %) old-path))
-     :attach (vec (reverse (take-while #(not= fork %) new-path)))}))
+  (loop [old-hash (:active-tip before)
+         new-hash (:active-tip after)
+         detach []
+         attach []]
+    (let [old-node (get-in before [:nodes old-hash])
+          new-node (get-in after [:nodes new-hash])]
+      (when-not (and old-node new-node)
+        (fail! :bitcoin.node/missing-header-node
+               "Cannot derive a reorganization across a missing header."
+               {:old old-hash :new new-hash}))
+      (cond
+        (> (:height old-node) (:height new-node))
+        (recur (:parent old-node) new-hash
+               (conj detach old-hash) attach)
+
+        (< (:height old-node) (:height new-node))
+        (recur old-hash (:parent new-node)
+               detach (conj attach new-hash))
+
+        (= old-hash new-hash)
+        {:detach detach :attach (vec (reverse attach))}
+
+        :else
+        (recur (:parent old-node) (:parent new-node)
+               (conj detach old-hash) (conj attach new-hash))))))
 
 (defn- attachment [state hash]
   (let [node (get-in state [:nodes hash])]
@@ -508,8 +679,9 @@
          (:backend node) (:tip foreground-status)
          (:height foreground-status) (encode-host-state promoted)
          (selected-nodes promoted [base]))
-        (reset! (:state node) promoted)
-        promoted))))
+        (let [compact (compact-state (:backend node) promoted)]
+          (reset! (:state node) compact)
+          compact)))))
 
 (defn accept-background-block!
   "Fully validate one pre-snapshot block in the independent disk chainstate.
@@ -570,9 +742,11 @@
               parsed (block/parse raw-block)
               parsed-hash (get-in parsed [:header :hash-hex])
               after
-              (chainstate/accept-block
-               hydrated parsed now (:verify-script node)
-               {:undo-fn #(sqlite/undo backend %)})
+              (advance-locator
+               before
+               (chainstate/accept-block
+                hydrated parsed now (:verify-script node)
+                {:undo-fn #(sqlite/undo backend %)}))
               active-changed?
               (not= (:active-tip before) (:active-tip after))
               coin-count (utxo/coin-count (get-in after [:utxo :coins]))
@@ -598,7 +772,7 @@
                backend (:tip durable-before) (:height durable-before)
                (encode-host-state stripped)
                (selected-nodes stripped [parsed-hash]))))
-          (reset! (:state node) stripped)
+          (reset! (:state node) (compact-state backend stripped))
           (consensus-status node))
         (catch Throwable error
           (sqlite/rollback! view)

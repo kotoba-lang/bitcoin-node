@@ -10,6 +10,7 @@
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.disk-consensus :as disk]
             [bitcoin.node.disk-utxo :as disk-utxo]
+            [bitcoin.node.lazy-header-map :as lazy-header-map]
             [bitcoin.node.peer :as peer]
             [clojure.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header])
@@ -95,10 +96,18 @@
         (is (nil? (get-in @(:state node)
                           [:nodes (:best-block
                                    (disk/consensus-status node)) :block])))
-        (let [reopened (disk/open {:path path :network :regtest})]
-          (is (= (disk/consensus-status node)
-                 (disk/consensus-status reopened)))
-          (is (disk/ready? reopened)))))))
+        (with-redefs
+         [sqlite/header-nodes
+          (fn [_]
+            (throw
+             (AssertionError.
+              "Normal restart must not materialize every header.")))]
+         (let [reopened (disk/open {:path path :network :regtest})]
+           (is (lazy-header-map/lazy-header-map?
+                (:nodes @(:state reopened))))
+           (is (= (disk/consensus-status node)
+                  (disk/consensus-status reopened)))
+           (is (disk/ready? reopened))))))))
 
 (deftest normalized-header-storage-keeps-host-state-compact-and-migrates
   (with-store
@@ -116,11 +125,27 @@
             backend (:backend node)
             compact-bytes (sqlite/host-state backend)
             compact (storage/decode-value compact-bytes)]
-        (is (= "bitcoin.node.disk-consensus.normalized.v1"
+        (is (= "bitcoin.node.disk-consensus.normalized.v2"
                (:format compact)))
         (is (nil? (get-in compact [:state :nodes])))
         (is (= 26 (count (sqlite/header-nodes backend))))
         (is (< (alength compact-bytes) 10000))
+        ;; The first lazy-index release upgrades normalized v1 metadata once.
+        (let [durable (sqlite/status backend)
+              v1
+              (-> compact
+                  (assoc :format
+                         "bitcoin.node.disk-consensus.normalized.v1")
+                  (update :state dissoc
+                          :bitcoin.node.disk-consensus/block-locator))]
+          (sqlite/save-host-state!
+           backend (:tip durable) (:height durable)
+           (storage/encode-value v1))
+          (let [reopened (disk/open {:path path :network :regtest})]
+            (is (= "bitcoin.node.disk-consensus.normalized.v2"
+                   (:format
+                    (storage/decode-value
+                     (sqlite/host-state (:backend reopened))))))))
         ;; A v0.12-era database is upgraded transactionally on next open.
         (let [state @(:state node)
               durable (sqlite/status backend)]
@@ -132,10 +157,36 @@
                  (sqlite/host-state (:backend reopened)))]
             (is (= (disk/consensus-status node)
                    (disk/consensus-status reopened)))
-            (is (= "bitcoin.node.disk-consensus.normalized.v1"
+            (is (= "bitcoin.node.disk-consensus.normalized.v2"
                    (:format migrated)))
             (is (= 26
                    (count (sqlite/header-nodes (:backend reopened)))))))))))
+
+(deftest durable-locator-stays-bounded-across-many-small-batches
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            blocks
+            (vec
+             (rest
+              (reductions fixture/mine-regtest-block
+                          genesis (range 1 81))))
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})]
+        (doseq [value blocks]
+          (disk/accept-header!
+           node (get-in value [:header :bytes]) 2000000000))
+        (let [locator (disk/block-locator @(:state node))
+              reopened (disk/open {:path path :network :regtest})]
+          (is (<= 1 (count locator) 64))
+          (is (= (get-in (peek blocks) [:header :hash])
+                 (first locator)))
+          (is (= (get-in genesis [:header :hash]) (peek locator)))
+          (is (= locator
+                 (disk/block-locator @(:state reopened)))))))))
 
 (deftest block-locator-is-dense-then-exponentially-backtracks-to-genesis
   (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
