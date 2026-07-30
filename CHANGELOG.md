@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2 — 2026-07-30
+
+- Add a resumable Core-backed snapshot historical harness covering full header
+  validation, retained post-snapshot blocks, and interval process restarts.
+
 ## 0.8.1 — 2026-07-30
 
 - Add atomic AssumeUTXO initialization to the disk consensus host using an

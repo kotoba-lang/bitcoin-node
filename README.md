@@ -157,3 +157,23 @@ clojure -M:test
 clojure -M:lint
 clojure -M:coverage
 ```
+
+Snapshot-start historical differential against a synchronized/pruned Core:
+
+```bash
+CONSENSUS_CORE_DATADIR=/path/to/bitcoin \
+CONSENSUS_SNAPSHOT_PATH=/path/to/utxo.dat \
+CONSENSUS_SNAPSHOT_HEIGHT=840000 \
+CONSENSUS_HEADER_CHAINSTATE=/path/to/headers.edn \
+CONSENSUS_DISK_CHAINSTATE=/path/to/consensus.sqlite \
+CONSENSUS_HISTORY_END=850000 \
+./scripts/core_snapshot_history_differential.sh
+```
+
+The harness independently validates every header through the requested end,
+authenticates the snapshot against the pinned Core v31.1 AssumeUTXO anchor,
+compares each retained raw block's hash/size/weight with Core, applies it to
+the disk consensus host, and reopens the database at a configurable interval.
+If a pruned node no longer has the requested post-snapshot range it fails
+before importing state. `CONSENSUS_GENESIS_HEX` is needed only when Core has
+also pruned the genesis block and no header checkpoint exists.
