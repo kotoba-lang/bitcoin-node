@@ -36,7 +36,10 @@ rehydrated only along a candidate activation path. Attached staging rows are
 deleted in the same UTXO reorganization transaction; a detached branch must
 be fetched again before a later reactivation. Defaults retain at most 288
 blocks and 512 MiB, configurable with `:pending-block-limit` and
-`:pending-byte-limit`.
+`:pending-byte-limit`. Active-chain undo is independently retained for at
+least 288 blocks by default. The monotonic prune floor does not create Bitcoin
+finality: a deeper valid fork produces an explicit authenticated-history
+reindex plan.
 Normalized headers are exposed through an immutable lazy map with a bounded
 LRU and write overlay, so normal restart reads only compact host metadata plus
 the active and best tips. A bounded block locator is persisted with that
@@ -163,12 +166,14 @@ Atomic disk-backed validation:
     :genesis-bytes raw-genesis-block
     :path "data/mainnet-consensus.sqlite"
     :pending-block-limit 288
-    :pending-byte-limit (* 512 1024 1024)}))
+    :pending-byte-limit (* 512 1024 1024)
+    :undo-retention-blocks 288}))
 
 (disk-consensus/accept-header! durable raw-80-byte-header unix-time)
 (disk-consensus/accept-block! durable raw-block unix-time)
 (disk-consensus/consensus-status durable)
 (disk-consensus/integrity-check! durable)
+(disk-consensus/recovery-plan durable fork-height)
 ```
 
 Direct header synchronization:
@@ -229,7 +234,12 @@ chainstate blob is rejected; it is never assigned inferred fork-choice state.
 For snapshot-start, pass an authenticated Core v2 snapshot as
 `:snapshot-source` and a separately PoW/difficulty-validated, headers-only
 chainstate as `:header-state`. The snapshot base must be on its most-work
-header chain. UTXOs, `:assumed` trust status, active tip, and headers are
+header chain. When that state came from another normalized disk node, pass its
+`:backend` as `:snapshot-header-backend`; ancestry authentication then uses one
+bounded SQLite cursor rather than repeatedly opening the database. Because
+normalized header state does not retain full blocks, also pass canonical
+`:background-genesis-bytes` when genesis cannot be derived from
+`:header-state`. UTXOs, `:assumed` trust status, active tip, and headers are
 committed together; `ready?` remains false across restart until independent
 background validation reproduces the pinned UTXO commitment. The disk host
 creates `<path>.background` from genesis and advances it with
@@ -285,3 +295,28 @@ On an archival Core, set `CONSENSUS_BACKGROUND_VALIDATE=true` to replay blocks
 1 through the snapshot base into the independent disk chainstate, reopen it at
 the configured interval, recompute the base commitment, and require the final
 foreground state to report `snapshot=validated` and `ready=true`.
+
+For a pruned Core and an existing normalized header database, a bounded
+snapshot-to-retained-tip soak avoids creating a million-header EDN file:
+
+```bash
+CONSENSUS_CORE_DATADIR=/path/to/bitcoin \
+CONSENSUS_NORMALIZED_HEADER_DATABASE=/path/to/headers.sqlite \
+CONSENSUS_SNAPSHOT_PATH=/path/to/utxo.dat \
+CONSENSUS_SNAPSHOT_HEIGHT=410600 \
+CONSENSUS_SNAPSHOT_BASE_HASH=<dumptxoutset.base_hash> \
+CONSENSUS_SNAPSHOT_COMMITMENT=<dumptxoutset.txoutset_hash> \
+CONSENSUS_SNAPSHOT_CHAIN_TXS=<dumptxoutset.nchaintx> \
+CONSENSUS_GENESIS_HEX=<canonical-genesis-block-hex> \
+CONSENSUS_DISK_CHAINSTATE=/path/to/soak.sqlite \
+CONSENSUS_HISTORY_END=410647 \
+./scripts/core_normalized_snapshot_soak.sh
+```
+
+The snapshot must come from Core's `dumptxoutset`; the harness authenticates
+its base against the already consensus-validated normalized header ancestry,
+prefetches the complete retained raw-block range before the long import so
+Core cannot prune it mid-run, compares every block's hash/size/weight, reopens
+on a bounded interval, and finishes with SQLite, undo-linkage, and full
+normalized-header integrity checks. A restart skips only heights whose
+active-chain hashes still match the prefetched manifest.

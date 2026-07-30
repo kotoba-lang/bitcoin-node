@@ -18,11 +18,16 @@
             [kotobase.bitcoin.protocol :as header]))
 
 (defrecord DiskConsensusNode
-  [state backend verify-script network background pending-limits])
+  [state backend verify-script network background pending-limits
+   undo-retention-blocks ancestor-cache])
 
 (def ^:private disk-coins-key ::disk-backed)
 (def default-pending-block-limit 288)
 (def default-pending-byte-limit (* 512 1024 1024))
+(def minimum-undo-retention-blocks 288)
+(def default-undo-retention-blocks minimum-undo-retention-blocks)
+(def ^:private ancestor-cache-window 288)
+(def ^:private maximum-ancestor-cache-tips 8)
 
 (defn- disk-coins [coin-count]
   {disk-coins-key true :coin-count coin-count})
@@ -323,7 +328,8 @@
         :else (recur (:parent node))))))
 
 (defn- seed-assumeutxo!
-  [backend network header-state snapshot-source snapshot-options]
+  [backend network header-state header-backend
+   snapshot-source snapshot-options]
   (when-not (= network (:network header-state))
     (fail! :bitcoin.node/snapshot-header-network
            "AssumeUTXO header state belongs to another network."
@@ -335,12 +341,25 @@
   (let [result (volatile! nil)]
     (sqlite/import-snapshot!
      backend snapshot-source
-     #(best-header-hash-at-height header-state %)
+     #(or (get-in snapshot-options [:checkpoints % :blockhash])
+          (best-header-hash-at-height header-state %))
      (assoc
       snapshot-options
       :host-state-fn
       (fn [loaded]
-        (let [activated (assumeutxo/activate header-state loaded)
+        (let [activation-options
+              (when header-backend
+                {:ancestor-hash-at-height-fn
+                 (fn [_state tip height]
+                   (sqlite/header-ancestor-hash-at-height
+                    header-backend tip height))
+                 :ancestry-hashes-fn
+                 (fn [_state tip]
+                   (sqlite/header-ancestry-hashes
+                    header-backend tip))})
+              activated
+              (assumeutxo/activate
+               header-state loaded (or activation-options {}))
               coin-count (get-in loaded [:snapshot :coins-count])
               durable (strip-node-data activated coin-count)]
           (vreset! result durable)
@@ -358,10 +377,12 @@
   header or fork-choice state."
   [{:keys [path datasource network genesis-bytes verify-script
            busy-timeout-ms snapshot-source header-state snapshot-options
-           pending-block-limit pending-byte-limit]
+           snapshot-header-backend
+           pending-block-limit pending-byte-limit undo-retention-blocks]
     :or {busy-timeout-ms 5000
          pending-block-limit default-pending-block-limit
-         pending-byte-limit default-pending-byte-limit}}]
+         pending-byte-limit default-pending-byte-limit
+         undo-retention-blocks default-undo-retention-blocks}}]
   (when-not (contains? chainstate/consensus-parameters network)
     (fail! :bitcoin.node/unsupported-consensus-network
            "The disk consensus host has no parameters for this network."
@@ -376,6 +397,13 @@
            "Pending side-branch staging bounds are invalid."
            {:pending-block-limit pending-block-limit
             :pending-byte-limit pending-byte-limit}))
+  (when-not (and (integer? undo-retention-blocks)
+                 (<= minimum-undo-retention-blocks
+                     undo-retention-blocks))
+    (fail! :bitcoin.node/undo-retention-configuration
+           "Undo retention must preserve at least 288 active blocks."
+           {:undo-retention-blocks undo-retention-blocks
+            :minimum minimum-undo-retention-blocks}))
   (let [pending-limits
         {:maximum-count pending-block-limit
          :maximum-bytes pending-byte-limit}
@@ -399,7 +427,8 @@
                      "Snapshot initialization requires validated headers."
                      {:network network}))
             (seed-assumeutxo!
-             backend network header-state snapshot-source
+             backend network header-state snapshot-header-backend
+             snapshot-source
              (or snapshot-options {})))
 
           (= -1 (:height durable))
@@ -425,13 +454,41 @@
      (atom (if (lazy-header-map/lazy-header-map? (:nodes migrated))
              migrated
              (compact-state backend migrated)))
-     backend verify-script network nil pending-limits)))
+     backend verify-script network nil pending-limits
+     undo-retention-blocks (atom {}))))
 
 (defn- header-genesis-bytes [header-state]
   (when header-state
     (some-> (get-in header-state
                     [:nodes (:active-tip header-state) :block])
             block/serialize)))
+
+(defn- cached-ancestor-node
+  [node state tip height]
+  (let [nodes (:nodes state)
+        overlay
+        (if (lazy-header-map/lazy-header-map? nodes)
+          (into {} (lazy-header-map/overlay-entries nodes))
+          nodes)]
+    (loop [hash tip]
+      (if-let [overlay-node (get overlay hash)]
+        (cond
+          (= height (:height overlay-node)) overlay-node
+          (< (:height overlay-node) height) nil
+          :else (recur (:parent overlay-node)))
+        (or (get-in @(:ancestor-cache node) [hash height])
+            (let [window
+                  (sqlite/header-ancestor-nodes-between
+                   (:backend node) hash height
+                   (+ height (dec ancestor-cache-window)))]
+              (swap!
+               (:ancestor-cache node)
+               (fn [cache]
+                 (let [updated (assoc cache hash window)]
+                   (if (> (count updated) maximum-ancestor-cache-tips)
+                     {hash window}
+                     updated))))
+              (get window height)))))))
 
 (defn open
   "Open an atomic disk consensus node.
@@ -443,7 +500,7 @@
            busy-timeout-ms header-state
            background-path background-datasource
            background-genesis-bytes
-           pending-block-limit pending-byte-limit]
+           pending-block-limit pending-byte-limit undo-retention-blocks]
     :as options}]
   (let [node (open-single options)
         assumed? (= :assumed (get-in @(:state node) [:snapshot :status]))]
@@ -469,13 +526,16 @@
               :pending-block-limit
               (or pending-block-limit default-pending-block-limit)
               :pending-byte-limit
-              (or pending-byte-limit default-pending-byte-limit)})]
+              (or pending-byte-limit default-pending-byte-limit)
+              :undo-retention-blocks
+              (or undo-retention-blocks default-undo-retention-blocks)})]
         (assoc node :background background)))))
 
 (defn consensus-status [node]
   (let [state @(:state node)
         durable (sqlite/status (:backend node))
         pending (sqlite/pending-status (:backend node))
+        undo (sqlite/undo-status (:backend node))
         tip (:active-tip state)
         best (:best-header state)
         assumed? (= :assumed (get-in state [:snapshot :status]))
@@ -497,6 +557,11 @@
      (get-in node [:pending-limits :maximum-count])
      :pending-byte-limit
      (get-in node [:pending-limits :maximum-bytes])
+     :undo-retention-blocks (:undo-retention-blocks node)
+     :retained-undo-blocks (:retained-undo-blocks undo)
+     :undo-pruned-through-height
+     (:undo-pruned-through-height undo)
+     :available-reorg-depth (:available-reorg-depth undo)
      :fully-validated?
      (and (not= :assumed (get-in state [:snapshot :status]))
           (true? (get-in state [:nodes tip :block-valid?])))
@@ -520,6 +585,46 @@
 
 (defn integrity-check! [node]
   (sqlite/integrity-check! (:backend node)))
+
+(defn prune-undo!
+  "Apply the node's configured active-chain undo retention immediately."
+  [node]
+  (locking node
+    (sqlite/prune-undo!
+     (:backend node) (:undo-retention-blocks node))))
+
+(defn recovery-plan
+  "Describe whether a fork can reorganize in place or needs chainstate reindex.
+
+  `fork-height` is the common ancestor height, not the competing tip height."
+  [node fork-height]
+  (let [status (consensus-status node)
+        current-height (:height status)
+        floor (:undo-pruned-through-height status)]
+    (when-not (and (integer? fork-height)
+                   (<= 0 fork-height current-height))
+      (fail! :bitcoin.node/recovery-height
+             "Recovery fork height is outside the validated chain."
+             {:fork-height fork-height
+              :current-height current-height}))
+    (if (>= fork-height floor)
+      {:required? false
+       :mode :in-place-reorganization
+       :fork-height fork-height
+       :current-height current-height
+       :detach-blocks (- current-height fork-height)
+       :available-reorg-depth (:available-reorg-depth status)
+       :undo-pruned-through-height floor}
+      {:required? true
+       :mode :reindex-required
+       :recovery :reindex-from-authenticated-history
+       :fork-height fork-height
+       :current-height current-height
+       :missing-undo-through-height floor
+       :preserve-normalized-headers? true
+       :acceptable-sources
+       [:fully-validated-genesis-replay
+        :authenticated-assumeutxo-with-background-validation]})))
 
 (declare accept-headers!)
 
@@ -841,7 +946,10 @@
                before
                (chainstate/accept-block
                 hydrated parsed now (:verify-script node)
-                {:undo-fn #(sqlite/undo backend %)}))
+                {:undo-fn #(sqlite/undo backend %)
+                 :ancestor-node-at-height-fn
+                 (fn [state tip height]
+                   (cached-ancestor-node node state tip height))}))
               active-changed?
               (not= (:active-tip before) (:active-tip after))
               coin-count (utxo/coin-count (get-in after [:utxo :coins]))
@@ -861,6 +969,7 @@
                 (selected-nodes stripped
                                 (concat [parsed-hash] detach attach))
                 :pending-delete attach
+                :retain-undo-blocks (:undo-retention-blocks node)
                 :host-state-bytes (encode-host-state stripped)}))
             (do
               (sqlite/rollback! view)

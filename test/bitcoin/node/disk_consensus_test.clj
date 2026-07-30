@@ -25,8 +25,11 @@
     (try
       (run! path)
       (finally
-        (doseq [target [path (Path/of (str path ".background")
-                                     (make-array String 0))]
+        (doseq [target [path
+                        (Path/of (str path ".background")
+                                 (make-array String 0))
+                        (Path/of (str path ".headers")
+                                 (make-array String 0))]
                 suffix ["-shm" "-wal" ""]]
           (Files/deleteIfExists
            (Path/of (str target suffix) (make-array String 0))))
@@ -84,14 +87,23 @@
                  node [(get-in block-1 [:header :bytes])
                        (get-in block-2 [:header :bytes])]
                  2000000000))))
-        (is (= 1
-               (:height
-                (disk/accept-block!
-                 node (block/serialize block-1) 2000000000))))
-        (is (= 2
-               (:height
-                (disk/accept-block!
-                 node (block/serialize block-2) 2000000000))))
+        (let [queries (atom 0)
+              resolver sqlite/header-ancestor-nodes-between]
+          (with-redefs
+           [sqlite/header-ancestor-nodes-between
+            (fn [& arguments]
+              (swap! queries inc)
+              (apply resolver arguments))]
+           (is (= 1
+                  (:height
+                   (disk/accept-block!
+                    node (block/serialize block-1) 2000000000))))
+           (is (= 2
+                  (:height
+                   (disk/accept-block!
+                    node (block/serialize block-2) 2000000000)))))
+          (is (= 1 @queries)
+              "the second sequential block reuses the ancestry window"))
         (is (= :ok (:integrity (disk/integrity-check! node))))
         (is (nil? (get-in @(:state node)
                           [:nodes (:best-block
@@ -161,6 +173,68 @@
                    (:format migrated)))
             (is (= 26
                    (count (sqlite/header-nodes (:backend reopened)))))))))))
+
+(deftest node-retains-a-core-sized-reorg-window-and-plans-deep-recovery
+  (with-store
+    (fn [path]
+      (is (= :bitcoin.node/undo-retention-configuration
+             (:type
+              (ex-data
+               (try
+                 (disk/open
+                  {:path path :network :regtest
+                   :genesis-bytes
+                   (fixture/hex->bytes fixture/regtest-genesis)
+                   :undo-retention-blocks 287})
+                 (catch clojure.lang.ExceptionInfo error error))))))
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})]
+        (loop [parent genesis height 1]
+          (when (<= height 290)
+            (let [next (fixture/mine-regtest-block parent height)]
+              (disk/accept-block!
+               node (block/serialize next) 2000000000)
+              (recur next (inc height)))))
+        (let [status (disk/consensus-status node)]
+          (is (= 290 (:height status)))
+          (is (= 288 (:undo-retention-blocks status)))
+          (is (= 288 (:retained-undo-blocks status)))
+          (is (= 2 (:undo-pruned-through-height status)))
+          (is (= 288 (:available-reorg-depth status))))
+        (is (= {:required? false
+                :mode :in-place-reorganization
+                :fork-height 2
+                :current-height 290
+                :detach-blocks 288
+                :available-reorg-depth 288
+                :undo-pruned-through-height 2}
+               (disk/recovery-plan node 2)))
+        (is (= {:required? true
+                :mode :reindex-required
+                :recovery :reindex-from-authenticated-history
+                :fork-height 1
+                :current-height 290
+                :missing-undo-through-height 2
+                :preserve-normalized-headers? true
+                :acceptable-sources
+                [:fully-validated-genesis-replay
+                 :authenticated-assumeutxo-with-background-validation]}
+               (disk/recovery-plan node 1)))
+        (is (= :bitcoin.node/recovery-height
+               (:type
+                (ex-data
+                 (try
+                   (disk/recovery-plan node -1)
+                   (catch clojure.lang.ExceptionInfo error error))))))
+        (is (= 0 (:deleted-undo-blocks (disk/prune-undo! node))))
+        (is (= :ok (:undo-integrity (disk/integrity-check! node))))
+        (let [reopened (disk/open {:path path :network :regtest})]
+          (is (= (disk/consensus-status node)
+                 (disk/consensus-status reopened))))))))
 
 (deftest durable-locator-stays-bounded-across-many-small-batches
   (with-store
@@ -432,14 +506,20 @@
             snapshot (fixture/core-snapshot base-hash coins)
             commitment
             (assumeutxo/hash-serialized coins)
-            headers
-            (-> (chainstate/initialize :regtest genesis)
-                (chainstate/accept-header
-                 (:header block-1) 2000000000)
-                (chainstate/accept-header
-                 (:header block-2) 2000000000)
-                (chainstate/accept-header
-                 (:header block-3) 2000000000))
+            header-node
+            (disk/open
+             {:path (Path/of (str path ".headers")
+                             (make-array String 0))
+              :network :regtest
+              :genesis-bytes
+              (fixture/hex->bytes fixture/regtest-genesis)})
+            _ (disk/accept-headers!
+               header-node
+               [(get-in block-1 [:header :bytes])
+                (get-in block-2 [:header :bytes])
+                (get-in block-3 [:header :bytes])]
+               2000000000)
+            headers @(:state header-node)
             options
             {:checkpoints
              {2 {:blockhash base-hash
@@ -449,8 +529,11 @@
             (disk/open
              {:path path :network :regtest
               :header-state headers
+              :snapshot-header-backend (:backend header-node)
               :snapshot-source snapshot
-              :snapshot-options options})]
+              :snapshot-options options
+              :background-genesis-bytes
+              (fixture/hex->bytes fixture/regtest-genesis)})]
         (is (= :assumed (:snapshot-status
                          (disk/consensus-status node))))
         (is (= 0 (:background-height

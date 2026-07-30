@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.19.0 — 2026-07-31
+
+- Retain a configurable active-chain undo window with a Bitcoin Core-sized
+  minimum/default of 288 blocks and prune it inside the atomic fork commit.
+- Expose retained journals, persisted prune floor, and immediate reorg depth
+  in node status; distinguish in-place forks from authenticated-history
+  reindex recovery.
+- Upgrade to `bitcoin-consensus` v0.17.0 for schema-v6 undo linkage audits,
+  snapshot-aware monotonic pruning, single-connection ancestry proofs, and a
+  single prepared upsert across the complete authenticated snapshot stream.
+- Route normal AssumeValid and BIP68 block checks through the normalized
+  storage ancestry cursor instead of opening SQLite once per intermediate
+  header.
+- Retain a bounded 288-height ancestry window for each recent proof tip, so
+  sequential historical blocks pay for one distant traversal rather than one
+  traversal per block.
+- Add a resumable Core differential soak that reuses the bounded normalized
+  mainnet header database instead of materializing a million-header EDN state.
+- Validate a real height-416179 mainnet snapshot through ten independently
+  fetched retained blocks, restart at height 416189, and audit 960,261 headers,
+  39,059,286 UTXOs, and 79,591 undo rows with no integrity error.
+
 ## 0.18.0 — 2026-07-30
 
 - Upgrade to `bitcoin-consensus` v0.12.0, whose SQLite transition boundary is
