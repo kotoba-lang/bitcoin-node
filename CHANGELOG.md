@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.20.0 — 2026-07-31
+
+- Activate AssumeUTXO over a source-backed lazy header map, capture only its
+  authenticated active-path set, and stream normalized rows into the target in
+  bounded batches.
+- Rebind the returned chainstate to the target database after the atomic
+  commit, eliminating the million-node activation map and its multi-gigabyte
+  transient heap.
+- Validate a real height-416179 mainnet snapshot containing 39,062,903 UTXOs
+  against 960,261 normalized headers in 3,695.16 seconds with full integrity
+  success and 2,421,440,512-byte maximum RSS, down from the pre-streaming
+  activation's approximately 5.3 GiB.
+- Add a resumable, source-non-destructive reindex session for genesis replay
+  or authenticated snapshots, with explicit block/background ingestion.
+- Require an unchanged source tip, fully validated target, declared common
+  ancestor with different immediate children, strictly better chainwork, and
+  full integrity before issuing a storage-pointer handoff; neither database is
+  renamed or deleted.
+- Atomically publish and checksum a path-backed reindex pointer for
+  process-supervised cutover while retaining the source as rollback state;
+  reject canonical path aliases, missing targets, network mismatches, corrupt
+  pointers, and filesystems without atomic replacement.
+- Seal the live source, target, and their background chainstates against every
+  mutation at pointer publication, while leaving both databases untouched and
+  explicitly reopenable for cutover or rollback.
+
 ## 0.19.0 — 2026-07-31
 
 - Retain a configurable active-chain undo window with a Bitcoin Core-sized

@@ -15,11 +15,18 @@
             [bitcoin.node.lazy-header-map :as lazy-header-map]
             [bitcoin.node.peer :as peer]
             [bitcoin.node.peer-pool :as peer-pool]
-            [kotobase.bitcoin.protocol :as header]))
+            [kotobase.bitcoin.protocol :as header])
+  (:import [java.nio.channels FileChannel]
+           [java.nio.file AtomicMoveNotSupportedException Files OpenOption Path
+            StandardCopyOption StandardOpenOption]))
 
 (defrecord DiskConsensusNode
   [state backend verify-script network background pending-limits
-   undo-retention-blocks ancestor-cache])
+   undo-retention-blocks ancestor-cache storage-id sealed?])
+
+(defrecord ReindexSession
+  [source target fork-height mode source-status target-storage
+   phase verification])
 
 (def ^:private disk-coins-key ::disk-backed)
 (def default-pending-block-limit 288)
@@ -28,6 +35,32 @@
 (def default-undo-retention-blocks minimum-undo-retention-blocks)
 (def ^:private ancestor-cache-window 288)
 (def ^:private maximum-ancestor-cache-tips 8)
+(def ^:private reindex-pointer-format
+  "bitcoin.node.reindex-pointer.v1")
+
+(defn- storage-id [path datasource]
+  (if path
+    (let [resolved
+          (.normalize
+           (.toAbsolutePath
+            (Path/of (str path) (make-array String 0))))]
+      (str
+       (if (Files/exists
+            resolved (make-array java.nio.file.LinkOption 0))
+         (.toRealPath resolved (make-array java.nio.file.LinkOption 0))
+         resolved)))
+    datasource))
+
+(defn- same-storage? [left right]
+  (cond
+    (= left right) true
+    (and (string? left) (string? right))
+    (let [left-path (Path/of left (make-array String 0))
+          right-path (Path/of right (make-array String 0))]
+      (and (Files/exists left-path (make-array java.nio.file.LinkOption 0))
+           (Files/exists right-path (make-array java.nio.file.LinkOption 0))
+           (Files/isSameFile left-path right-path)))
+    :else false))
 
 (defn- disk-coins [coin-count]
   {disk-coins-key true :coin-count coin-count})
@@ -53,6 +86,18 @@
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
+
+(defn- ensure-writable! [node]
+  (when @(:sealed? node)
+    (fail! :bitcoin.node/reindex-storage-sealed
+           "This node is sealed after reindex pointer publication."
+           {:storage (:storage-id node)})))
+
+(defn- seal-node! [node]
+  (reset! (:sealed? node) true)
+  (when-let [background (:background node)]
+    (seal-node! background))
+  node)
 
 (def ^:private normalized-host-format
   "bitcoin.node.disk-consensus.normalized.v2")
@@ -338,36 +383,62 @@
     (fail! :bitcoin.node/snapshot-header-active-tip
            "Snapshot initialization requires a headers-only state at genesis."
            {:height (chainstate/active-height header-state)}))
-  (let [result (volatile! nil)]
+  (let [result (volatile! nil)
+        active-path (volatile! nil)]
     (sqlite/import-snapshot!
      backend snapshot-source
      #(or (get-in snapshot-options [:checkpoints % :blockhash])
           (best-header-hash-at-height header-state %))
-     (assoc
-      snapshot-options
-      :host-state-fn
-      (fn [loaded]
-        (let [activation-options
-              (when header-backend
-                {:ancestor-hash-at-height-fn
-                 (fn [_state tip height]
-                   (sqlite/header-ancestor-hash-at-height
-                    header-backend tip height))
-                 :ancestry-hashes-fn
-                 (fn [_state tip]
-                   (sqlite/header-ancestry-hashes
-                    header-backend tip))})
-              activated
-              (assumeutxo/activate
-               header-state loaded (or activation-options {}))
-              coin-count (get-in loaded [:snapshot :coins-count])
-              durable (strip-node-data activated coin-count)]
-          (vreset! result durable)
-          (encode-host-state durable)))
-      :header-nodes-fn
-      (fn [_loaded]
-        (vals (:nodes @result)))))
-    @result))
+     (cond->
+      (assoc
+       snapshot-options
+       :host-state-fn
+       (fn [loaded]
+         (let [activation-options
+               (when header-backend
+                 {:ancestor-hash-at-height-fn
+                  (fn [_state tip height]
+                    (sqlite/header-ancestor-hash-at-height
+                     header-backend tip height))
+                  :ancestry-hashes-fn
+                  (fn [_state tip]
+                    (sqlite/header-ancestry-hashes
+                     header-backend tip))
+                  :activate-nodes-fn
+                  (fn [nodes path]
+                    (vreset! active-path path)
+                    nodes)})
+               activated
+               (assumeutxo/activate
+                header-state loaded (or activation-options {}))
+               coin-count (get-in loaded [:snapshot :coins-count])
+               durable (strip-node-data activated coin-count)]
+           (vreset! result durable)
+           (encode-host-state durable))))
+       header-backend
+       (assoc
+        :header-node-producer-fn
+        (fn [_loaded emit!]
+          (let [path @active-path]
+            (when-not (set? path)
+              (fail! :bitcoin.node/snapshot-active-path
+                     "Snapshot header activation path was not captured." {}))
+            (sqlite/consume-header-nodes!
+             header-backend
+             (fn [node]
+               (emit!
+                (assoc node :active?
+                       (contains? path (:hash node)))))))))
+       (nil? header-backend)
+       (assoc
+        :header-nodes-fn
+        (fn [_loaded]
+          (vals (:nodes @result))))))
+    (let [durable @result]
+      (if header-backend
+        (assoc durable :nodes
+               (lazy-nodes backend (node-data (:nodes durable))))
+        durable))))
 
 (defn- open-single
   "Open or initialize an atomic disk-backed consensus node.
@@ -455,7 +526,8 @@
              migrated
              (compact-state backend migrated)))
      backend verify-script network nil pending-limits
-     undo-retention-blocks (atom {}))))
+     undo-retention-blocks (atom {}) (storage-id path datasource)
+     (atom false))))
 
 (defn- header-genesis-bytes [header-state]
   (when header-state
@@ -570,6 +642,7 @@
      :snapshot-base-block (get-in state [:snapshot :base-blockhash])
      :background-height (:height background-status)
      :background-tip (:tip background-status)
+     :sealed-for-reindex? @(:sealed? node)
      :persistent? true}))
 
 (defn ready? [node]
@@ -590,6 +663,7 @@
   "Apply the node's configured active-chain undo retention immediately."
   [node]
   (locking node
+    (ensure-writable! node)
     (sqlite/prune-undo!
      (:backend node) (:undo-retention-blocks node))))
 
@@ -638,6 +712,7 @@
   No header in a failing batch becomes visible."
   [node raw-headers now]
   (locking node
+    (ensure-writable! node)
     (let [before @(:state node)
           parsed
           (mapv #(header/decode-block-header (vec %)) raw-headers)
@@ -879,6 +954,7 @@
   the foreground trust state when height, tip, and commitment all match."
   [node raw-block now]
   (locking node
+    (ensure-writable! node)
     (when-not (= :assumed (get-in @(:state node) [:snapshot :status]))
       (fail! :bitcoin.node/no-background-validation
              "No assumed snapshot is awaiting background validation." {}))
@@ -901,6 +977,7 @@
   has reached the snapshot base. This never advances either chainstate."
   [node]
   (locking node
+    (ensure-writable! node)
     (when-not (= :assumed (get-in @(:state node) [:snapshot :status]))
       (fail! :bitcoin.node/no-background-validation
              "No assumed snapshot is awaiting background validation." {}))
@@ -922,6 +999,7 @@
   active undo journals, and checksummed restart state."
   [node raw-block now]
   (locking node
+    (ensure-writable! node)
     (let [backend (:backend node)
           durable-before (sqlite/status backend)
           before @(:state node)
@@ -984,3 +1062,315 @@
             (catch Throwable error
               (sqlite/rollback! view)
               (throw error))))))))
+
+(defn begin-reindex!
+  "Open a non-destructive deep-reorganization rebuild target.
+
+  `mode` is `:fully-validated-genesis-replay` or
+  `:authenticated-assumeutxo-with-background-validation`. `target-options`
+  are passed to `open`; the resolved target storage must differ from the live
+  source. Existing target state is accepted so an interrupted rebuild can
+  resume."
+  [source fork-height {:keys [mode target-options]}]
+  (let [plan (recovery-plan source fork-height)
+        supported
+        #{:fully-validated-genesis-replay
+          :authenticated-assumeutxo-with-background-validation}]
+    (when-not (:required? plan)
+      (fail! :bitcoin.node/reindex-unnecessary
+             "The requested fork remains inside the retained undo window."
+             {:fork-height fork-height :plan plan}))
+    (when-not (and (contains? supported mode)
+                   (map? target-options))
+      (fail! :bitcoin.node/reindex-configuration
+             "Reindex mode or target options are invalid."
+             {:mode mode :supported supported}))
+    (let [target (open target-options)
+          source-status (consensus-status source)
+          target-status (consensus-status target)]
+      (when (same-storage? (:storage-id source) (:storage-id target))
+        (fail! :bitcoin.node/reindex-source-target-alias
+               "Reindex target resolves to the live source storage."
+               {:storage (:storage-id source)}))
+      (when-not (= (:network source) (:network target))
+        (fail! :bitcoin.node/reindex-network
+               "Reindex source and target belong to different networks."
+               {:source (:network source) :target (:network target)}))
+      (case mode
+        :fully-validated-genesis-replay
+        (when-not (and (nil? (:snapshot-status target-status))
+                       (:fully-validated? target-status))
+          (fail! :bitcoin.node/reindex-genesis-target
+                 "Genesis replay target must contain only fully validated blocks."
+                 {:status target-status}))
+
+        :authenticated-assumeutxo-with-background-validation
+        (when-not (contains? #{:assumed :validated}
+                             (:snapshot-status target-status))
+          (fail! :bitcoin.node/reindex-snapshot-target
+                 "Snapshot reindex target lacks authenticated snapshot state."
+                 {:status target-status})))
+      (->ReindexSession
+       source target fork-height mode source-status (:storage-id target)
+       (atom :replaying) (atom nil)))))
+
+(defn reindex-status
+  "Return source immutability, target progress, and verification state."
+  [session]
+  (let [source-now (consensus-status (:source session))
+        target-now (consensus-status (:target session))
+        source-before (:source-status session)
+        source-unchanged?
+        (= (select-keys source-before [:height :best-block :chainwork])
+           (select-keys source-now [:height :best-block :chainwork]))]
+    {:phase @(:phase session)
+     :mode (:mode session)
+     :fork-height (:fork-height session)
+     :source-unchanged? source-unchanged?
+     :source
+     (select-keys source-now
+                  [:height :best-block :undo-pruned-through-height])
+     :target
+     (select-keys target-now
+                  [:height :best-block :fully-validated?
+                   :snapshot-status :background-height])
+     :target-storage (:target-storage session)
+     :verification @(:verification session)}))
+
+(defn accept-reindex-block!
+  "Validate and commit one rebuild block without mutating the live source."
+  [session raw-block now]
+  (locking session
+    (accept-block! (:target session) raw-block now)
+    (reset! (:verification session) nil)
+    (reset! (:phase session) :replaying)
+    (reindex-status session)))
+
+(defn accept-reindex-background-block!
+  "Advance independent snapshot background validation on the rebuild target."
+  [session raw-block now]
+  (locking session
+    (when-not (= :authenticated-assumeutxo-with-background-validation
+                 (:mode session))
+      (fail! :bitcoin.node/reindex-background-mode
+             "Genesis replay has no snapshot background chainstate."
+             {:mode (:mode session)}))
+    (accept-background-block! (:target session) raw-block now)
+    (reset! (:verification session) nil)
+    (reset! (:phase session) :replaying)
+    (reindex-status session)))
+
+(defn- active-ancestor-node
+  [node height]
+  (let [state @(:state node)]
+    (cached-ancestor-node node state (:active-tip state) height)))
+
+(defn verify-reindex!
+  "Audit a completed target and prove it is the requested better-work fork.
+
+  Verification fails if the source changed, the target is not fully validated,
+  the declared common ancestor differs, or target work does not exceed source
+  work. The source database is read-only throughout this workflow."
+  [session]
+  (locking session
+    (let [source (:source session)
+          target (:target session)]
+      (locking source
+        (locking target
+          (let [status-before (reindex-status session)
+                source-state @(:state source)
+                target-state @(:state target)
+                fork-height (:fork-height session)
+                source-fork (active-ancestor-node source fork-height)
+                target-fork (active-ancestor-node target fork-height)
+                source-child (active-ancestor-node source (inc fork-height))
+                target-child (active-ancestor-node target (inc fork-height))
+                source-work
+                (get-in source-state
+                        [:nodes (:active-tip source-state) :chainwork])
+                target-work
+                (get-in target-state
+                        [:nodes (:active-tip target-state) :chainwork])]
+            (when-not (:source-unchanged? status-before)
+              (fail! :bitcoin.node/reindex-source-changed
+                     "Live source changed during reindex; restart verification."
+                     {:status status-before}))
+            (when-not (ready? target)
+              (fail! :bitcoin.node/reindex-target-unready
+                     "Reindex target is not fully validated."
+                     {:target (:target status-before)}))
+            (when-not (and source-fork target-fork
+                           (= (:hash source-fork) (:hash target-fork)))
+              (fail!
+               :bitcoin.node/reindex-fork-mismatch
+               "Reindex target does not share the declared common ancestor."
+               {:fork-height fork-height
+                :source (:hash source-fork)
+                :target (:hash target-fork)}))
+            (when (or (nil? source-child)
+                      (nil? target-child)
+                      (= (:hash source-child) (:hash target-child)))
+              (fail!
+               :bitcoin.node/reindex-fork-not-divergent
+               "Declared fork height is not the chains' actual divergence."
+               {:fork-height fork-height
+                :source-child (:hash source-child)
+                :target-child (:hash target-child)}))
+            (when-not (header/better-chain? target-work source-work)
+              (fail! :bitcoin.node/reindex-insufficient-work
+                     "Reindex target does not exceed live source chainwork."
+                     {:source-height
+                      (get-in status-before [:source :height])
+                      :target-height
+                      (get-in status-before [:target :height])}))
+            (let [integrity (integrity-check! target)
+                  verification
+                  {:verified? true
+                   :source-tip
+                   (get-in status-before [:source :best-block])
+                   :target-tip
+                   (get-in status-before [:target :best-block])
+                   :fork-height fork-height
+                   :fork-block (:hash source-fork)
+                   :integrity integrity}]
+              (reset! (:verification session) verification)
+              (reset! (:phase session) :verified)
+              (reindex-status session))))))))
+
+(defn reindex-handoff
+  "Return a cutover descriptor only while verified source/target tips remain
+  unchanged. The caller can atomically change its own storage pointer to
+  `:target-storage`; this function never renames or deletes either database."
+  [session]
+  (locking session
+    (locking (:source session)
+      (locking (:target session)
+        (let [status (reindex-status session)
+              verification (:verification status)]
+          (when-not (and (= :verified (:phase status))
+                         (:source-unchanged? status)
+                         (:verified? verification)
+                         (= (get-in status [:source :best-block])
+                            (:source-tip verification))
+                         (= (get-in status [:target :best-block])
+                            (:target-tip verification)))
+            (fail! :bitcoin.node/reindex-not-verified
+                   "Reindex handoff requires unchanged verified source and target."
+                   {:status status}))
+          {:mode :switch-storage-pointer
+           :source-tip (:source-tip verification)
+           :target-tip (:target-tip verification)
+           :target-storage (:target-storage session)
+           :retain-source-as-rollback? true
+           :verification verification})))))
+
+(defn publish-reindex-handoff!
+  "Atomically publish a checksummed storage pointer for a verified reindex.
+
+  Database files remain untouched. A supervising process can stop the live
+  node, load this pointer, and reopen `:target-storage`; the old source remains
+  available for rollback."
+  [session pointer-path]
+  (locking session
+    (locking (:source session)
+      (locking (:target session)
+        (let [handoff (reindex-handoff session)
+              target-storage (:target-storage handoff)]
+          (when-not (string? target-storage)
+            (fail! :bitcoin.node/reindex-pointer-storage
+                   "Atomic pointer publication requires a path-backed target."
+                   {:target-storage target-storage}))
+          ;; Both recorded tips and the pointer remain one immutable handoff
+          ;; fact. Cutover or rollback reopens the selected database.
+          (seal-node! (:source session))
+          (seal-node! (:target session))
+          (let [target
+                (.normalize
+                 (.toAbsolutePath
+                  (Path/of (str pointer-path) (make-array String 0))))
+                parent (.getParent target)
+                _ (Files/createDirectories
+                   parent
+                   (make-array java.nio.file.attribute.FileAttribute 0))
+                temporary
+                (Files/createTempFile
+                 parent ".bitcoin-reindex-pointer-" ".tmp"
+                 (make-array java.nio.file.attribute.FileAttribute 0))
+                value
+                {:format reindex-pointer-format
+                 :network (:network (:source session))
+                 :target-storage target-storage
+                 :source-tip (:source-tip handoff)
+                 :target-tip (:target-tip handoff)
+                 :fork-height (:fork-height session)
+                 :published-at (quot (System/currentTimeMillis) 1000)}
+                bytes (storage/encode-value value)]
+            (try
+              (Files/write
+               temporary bytes
+               (into-array
+                OpenOption
+                [StandardOpenOption/WRITE
+                 StandardOpenOption/TRUNCATE_EXISTING]))
+              (with-open
+               [channel
+                (FileChannel/open
+                 temporary
+                 (into-array OpenOption [StandardOpenOption/WRITE]))]
+                (.force channel true))
+              (try
+                (Files/move
+                 temporary target
+                 (into-array
+                  java.nio.file.CopyOption
+                  [StandardCopyOption/ATOMIC_MOVE
+                   StandardCopyOption/REPLACE_EXISTING]))
+                (catch AtomicMoveNotSupportedException error
+                  (fail!
+                   :bitcoin.node/reindex-pointer-atomic-move
+                   "The pointer filesystem does not support atomic replacement."
+                   {:path (str target)
+                    :cause (.getMessage error)})))
+              (with-open
+               [directory
+                (FileChannel/open
+                 parent
+                 (into-array OpenOption [StandardOpenOption/READ]))]
+                (.force directory true))
+              value
+              (finally
+                (Files/deleteIfExists temporary)))))))))
+
+(defn load-reindex-pointer
+  "Load and validate a published reindex storage pointer."
+  [pointer-path expected-network]
+  (let [path (Path/of (str pointer-path) (make-array String 0))]
+    (when-not (Files/isRegularFile
+               path (make-array java.nio.file.LinkOption 0))
+      (fail! :bitcoin.node/reindex-pointer-missing
+             "Reindex storage pointer does not exist."
+             {:path (str pointer-path)}))
+    (let [value (storage/decode-value (Files/readAllBytes path))
+          target (:target-storage value)
+          target-path
+          (when (string? target)
+            (Path/of target (make-array String 0)))]
+      (when-not (and (= reindex-pointer-format (:format value))
+                     (= expected-network (:network value))
+                     (string? target)
+                     (.isAbsolute target-path)
+                     (string? (:source-tip value))
+                     (string? (:target-tip value))
+                     (nat-int? (:fork-height value))
+                     (nat-int? (:published-at value)))
+        (fail! :bitcoin.node/reindex-pointer-invalid
+               "Reindex storage pointer is malformed or network-mismatched."
+               {:path (str pointer-path)
+                :expected-network expected-network}))
+      (when-not (Files/isRegularFile
+                 target-path (make-array java.nio.file.LinkOption 0))
+        (fail! :bitcoin.node/reindex-pointer-target-missing
+               "The published reindex target database does not exist."
+               {:path (str pointer-path)
+                :target-storage target}))
+      value)))

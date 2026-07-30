@@ -29,6 +29,10 @@
                         (Path/of (str path ".background")
                                  (make-array String 0))
                         (Path/of (str path ".headers")
+                                 (make-array String 0))
+                        (Path/of (str path ".reindex")
+                                 (make-array String 0))
+                        (Path/of (str path ".reindex-pointer")
                                  (make-array String 0))]
                 suffix ["-shm" "-wal" ""]]
           (Files/deleteIfExists
@@ -232,9 +236,154 @@
                    (catch clojure.lang.ExceptionInfo error error))))))
         (is (= 0 (:deleted-undo-blocks (disk/prune-undo! node))))
         (is (= :ok (:undo-integrity (disk/integrity-check! node))))
+        (is (= :bitcoin.node/reindex-source-target-alias
+               (:type
+                (ex-data
+                 (try
+                   (disk/begin-reindex!
+                    node 1
+                    {:mode :fully-validated-genesis-replay
+                     :target-options {:path path :network :regtest}})
+                   (catch clojure.lang.ExceptionInfo error error))))))
+        (let [target-path
+              (Path/of (str path ".reindex") (make-array String 0))
+              pointer-path
+              (Path/of (str path ".reindex-pointer")
+                       (make-array String 0))
+              session
+              (disk/begin-reindex!
+               node 1
+               {:mode :fully-validated-genesis-replay
+                :target-options
+                {:path target-path :network :regtest
+                 :genesis-bytes
+                 (fixture/hex->bytes fixture/regtest-genesis)}})
+              common (fixture/mine-regtest-block genesis 1)]
+          (is (= :bitcoin.node/reindex-background-mode
+                 (:type
+                  (ex-data
+                   (try
+                     (disk/accept-reindex-background-block!
+                      session (block/serialize common) 2000000000)
+                     (catch clojure.lang.ExceptionInfo error error))))))
+          (disk/accept-reindex-block!
+           session (block/serialize common) 2000000000)
+          (is (= :bitcoin.node/reindex-fork-not-divergent
+                 (:type
+                  (ex-data
+                   (try
+                     (disk/verify-reindex! session)
+                     (catch clojure.lang.ExceptionInfo error error))))))
+          (let [fork-2 (mine-branch-block common 2 1)]
+            (disk/accept-reindex-block!
+             session (block/serialize fork-2) 2000000000)
+            (is (= :bitcoin.node/reindex-insufficient-work
+                   (:type
+                    (ex-data
+                     (try
+                       (disk/verify-reindex! session)
+                       (catch clojure.lang.ExceptionInfo error error))))))
+            (loop [parent fork-2 height 3]
+              (when (<= height 291)
+                (let [next (mine-branch-block parent height 1)]
+                  (disk/accept-reindex-block!
+                   session (block/serialize next) 2000000000)
+                  (recur next (inc height))))))
+          (let [before-verification (disk/reindex-status session)]
+            (is (= :replaying (:phase before-verification)))
+            (is (:source-unchanged? before-verification))
+            (is (= 290 (get-in before-verification [:source :height])))
+            (is (= 291 (get-in before-verification [:target :height]))))
+          (let [verified (disk/verify-reindex! session)
+                handoff (disk/reindex-handoff session)
+                published
+                (disk/publish-reindex-handoff!
+                 session pointer-path)
+                loaded
+                (disk/load-reindex-pointer pointer-path :regtest)]
+            (is (= :verified (:phase verified)))
+            (is (true? (get-in verified
+                               [:verification :verified?])))
+            (is (= :ok (get-in verified
+                               [:verification :integrity :integrity])))
+            (is (= :switch-storage-pointer (:mode handoff)))
+            (is (= (str (.toRealPath
+                         target-path
+                         (make-array java.nio.file.LinkOption 0)))
+                   (:target-storage handoff)))
+            (is (:retain-source-as-rollback? handoff))
+            (is (= (:target-storage handoff)
+                   (:target-storage published)
+                   (:target-storage loaded)))
+            (is (= (:target-tip handoff)
+                   (:target-tip loaded)))
+            (is (true?
+                 (:sealed-for-reindex?
+                  (disk/consensus-status node))))
+            (is (true?
+                 (:sealed-for-reindex?
+                  (disk/consensus-status (:target session)))))
+            (is (= :bitcoin.node/reindex-storage-sealed
+                   (:type
+                    (ex-data
+                     (try
+                       (disk/prune-undo! node)
+                       (catch clojure.lang.ExceptionInfo error error))))))
+            (is (= :bitcoin.node/reindex-storage-sealed
+                   (:type
+                    (ex-data
+                     (try
+                       (disk/prune-undo! (:target session))
+                       (catch clojure.lang.ExceptionInfo error error))))))
+            (is (= :bitcoin.node/reindex-storage-sealed
+                   (:type
+                    (ex-data
+                     (try
+                       (disk/accept-reindex-block!
+                        session [] 2000000000)
+                       (catch clojure.lang.ExceptionInfo error error))))))
+            (is (= :verified (:phase (disk/reindex-status session))))
+            (Files/write
+             pointer-path
+             (storage/encode-value
+              (assoc published
+                     :target-storage
+                     (str target-path ".missing")))
+             (make-array java.nio.file.OpenOption 0))
+            (is (= :bitcoin.node/reindex-pointer-target-missing
+                   (:type
+                    (ex-data
+                     (try
+                       (disk/load-reindex-pointer
+                        pointer-path :regtest)
+                       (catch clojure.lang.ExceptionInfo error error))))))
+            (let [damaged (Files/readAllBytes pointer-path)
+                  last-index (dec (alength damaged))]
+              (aset-byte
+               damaged last-index
+               (unchecked-byte
+                (bit-xor 1 (bit-and 0xff
+                                    (aget damaged last-index)))))
+              (Files/write
+               pointer-path damaged
+               (make-array java.nio.file.OpenOption 0))
+              (is (= :bitcoin.consensus/chainstate-checksum-mismatch
+                     (:type
+                      (ex-data
+                       (try
+                         (disk/load-reindex-pointer
+                          pointer-path :regtest)
+                         (catch clojure.lang.ExceptionInfo error error)))))))
+            (is (= 290 (:height (disk/consensus-status node))))))
         (let [reopened (disk/open {:path path :network :regtest})]
-          (is (= (disk/consensus-status node)
-                 (disk/consensus-status reopened))))))))
+          (is (false?
+               (:sealed-for-reindex?
+                (disk/consensus-status reopened))))
+          (is (=
+               (dissoc (disk/consensus-status node)
+                       :sealed-for-reindex?)
+               (dissoc (disk/consensus-status reopened)
+                       :sealed-for-reindex?))))))))
 
 (deftest durable-locator-stays-bounded-across-many-small-batches
   (with-store
@@ -534,6 +683,15 @@
               :snapshot-options options
               :background-genesis-bytes
               (fixture/hex->bytes fixture/regtest-genesis)})]
+        (is (lazy-header-map/lazy-header-map?
+             (:nodes @(:state node))))
+        (is (= 4 (sqlite/header-node-count (:backend node))))
+        (is (true? (:active?
+                    (sqlite/header-node (:backend node) base-hash))))
+        (is (false?
+             (:active?
+              (sqlite/header-node
+               (:backend node) (get-in block-3 [:header :hash-hex])))))
         (is (= :assumed (:snapshot-status
                          (disk/consensus-status node))))
         (is (= 0 (:background-height

@@ -176,6 +176,47 @@ Atomic disk-backed validation:
 (disk-consensus/recovery-plan durable fork-height)
 ```
 
+When `recovery-plan` reports `:reindex-required`, rebuild beside the live
+database and cut over only after verification:
+
+```clojure
+(def reindex
+  (disk-consensus/begin-reindex!
+   durable fork-height
+   {:mode :fully-validated-genesis-replay
+    :target-options
+    {:path "data/mainnet-consensus.reindex.sqlite"
+     :network :mainnet
+     :genesis-bytes raw-genesis-block}}))
+
+(doseq [raw-block authenticated-competing-history]
+  (disk-consensus/accept-reindex-block! reindex raw-block unix-time))
+
+(disk-consensus/verify-reindex! reindex)
+(disk-consensus/reindex-handoff reindex)
+(disk-consensus/publish-reindex-handoff!
+ reindex "data/mainnet-consensus.pointer")
+(disk-consensus/load-reindex-pointer
+ "data/mainnet-consensus.pointer" :mainnet)
+```
+
+The target can be reopened and passed back to `begin-reindex!` after an
+interruption. Snapshot mode uses
+`:authenticated-assumeutxo-with-background-validation` and advances its
+independent history with `accept-reindex-background-block!`. Verification
+requires the source tip to remain unchanged, a fully validated target, the
+declared common ancestor, strictly greater target chainwork, and a complete
+integrity audit. The handoff is a descriptor for an application-owned atomic
+storage-pointer switch. `publish-reindex-handoff!` durably and atomically
+replaces a checksummed pointer file only after those proofs still match;
+filesystems without atomic replacement fail closed. Loading rejects corrupt,
+network-mismatched, relative-target, and missing-target pointers. Canonical
+paths and filesystem identity prevent the source and target from aliasing.
+Publication seals the in-process source, target, and their background
+chainstates against further header, block, background, and undo mutations;
+cutover or rollback explicitly reopens the selected unchanged database.
+Neither function renames, overwrites, or deletes a chainstate database.
+
 Direct header synchronization:
 
 ```clojure
@@ -236,7 +277,9 @@ For snapshot-start, pass an authenticated Core v2 snapshot as
 chainstate as `:header-state`. The snapshot base must be on its most-work
 header chain. When that state came from another normalized disk node, pass its
 `:backend` as `:snapshot-header-backend`; ancestry authentication then uses one
-bounded SQLite cursor rather than repeatedly opening the database. Because
+bounded SQLite cursor rather than repeatedly opening the database, and header
+rows are copied in bounded batches without materializing the complete map.
+Because
 normalized header state does not retain full blocks, also pass canonical
 `:background-genesis-bytes` when genesis cannot be derived from
 `:header-state`. UTXOs, `:assumed` trust status, active tip, and headers are
@@ -320,3 +363,10 @@ Core cannot prune it mid-run, compares every block's hash/size/weight, reopens
 on a bounded interval, and finishes with SQLite, undo-linkage, and full
 normalized-header integrity checks. A restart skips only heights whose
 active-chain hashes still match the prefetched manifest.
+
+The v0.20 streaming regression run imported the real mainnet height-416179
+snapshot (39,062,903 UTXOs) against 960,261 normalized headers, reopened it
+with the release code, and completed the full integrity audit in 3,695.16
+seconds. Maximum RSS was 2,421,440,512 bytes (about 2.26 GiB), versus roughly
+5.3 GiB for the previous million-header materialization path. The resulting
+chainstate was 3.3 GiB with a fully checkpointed zero-byte WAL.
