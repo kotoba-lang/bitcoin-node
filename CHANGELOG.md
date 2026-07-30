@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-07-30
+
+- Integrate the separately versioned `bitcoin-consensus` v0.2.0 kernel.
+- Add a thread-safe embedded consensus host that validates raw blocks before
+  compare-and-set publication.
+- Require a Script verifier and optionally persist atomic checksummed
+  chainstate after every accepted block.
+- Report embedded validation height, best block, chainwork, UTXO count, and
+  persistence readiness without weakening the Bitcoin Core backend.
+
 ## 0.3.0 — 2026-07-30
 
 - Implement the shared read-only `chain-observer` snapshot contract.

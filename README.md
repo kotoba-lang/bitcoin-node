@@ -2,8 +2,8 @@
 
 Backend-neutral, watch-only Bitcoin node integration for Clojure.
 
-`bitcoin-node` does not reimplement Bitcoin consensus. It defines a small
-`NodeBackend` protocol and ships a hardened Bitcoin Core JSON-RPC adapter for:
+`bitcoin-node` defines a small `NodeBackend` protocol and ships a hardened
+Bitcoin Core JSON-RPC adapter for:
 
 - chain and initial-sync status;
 - canonical public output descriptor inspection;
@@ -15,6 +15,13 @@ Backend-neutral, watch-only Bitcoin node integration for Clojure.
 - optional compact-block-filter history candidate scans.
 - a CAIP-2 `bip122` snapshot implementing the shared
   [`chain-observer`](https://github.com/kotoba-lang/chain-observer) contract.
+
+It also exposes an opt-in embedded host around
+[`bitcoin-consensus`](https://github.com/kotoba-lang/bitcoin-consensus).
+`bitcoin.node.consensus/open` requires an explicit Script verifier, validates
+raw blocks before atomically publishing state, and can persist checksummed
+chainstate. This path is intended for progressive consensus development; the
+release blockers documented by `bitcoin-consensus` still apply.
 
 The adapter is loopback-only by default, prefers Bitcoin Core's short-lived
 cookie authentication, rejects URL userinfo/query/fragment components, limits
@@ -40,9 +47,9 @@ bounded before an RPC call is made.
 
 ## Non-goals
 
-This project is not a Bitcoin full node, consensus implementation, signer, key
-store, wallet database, or broadcast API. Bitcoin Core remains the validating
-security boundary. Other backends can implement `NodeBackend`, but must provide
+This project is not yet a production Bitcoin Core replacement, signer, key
+store, wallet database, or broadcast API. Bitcoin Core remains the default
+production validating security boundary. Other backends must provide
 equivalent validation semantics and contract tests.
 
 ## Usage
@@ -68,6 +75,22 @@ equivalent validation semantics and contract tests.
 (node/scan-status backend)
 (node/abort-scan! backend)
 (observer/snapshot backend)
+```
+
+Embedded validation:
+
+```clojure
+(require '[bitcoin.node.consensus :as consensus])
+
+(def embedded
+  (consensus/open
+   {:network :mainnet
+    :genesis-bytes raw-genesis-block
+    :verify-script verify-bitcoin-script
+    :snapshot-path "data/mainnet-chainstate.edn"}))
+
+(consensus/accept-block! embedded raw-block unix-time)
+(consensus/consensus-status embedded)
 ```
 
 `core/scan-blocks` requires a discovered, fully synchronized basic block
