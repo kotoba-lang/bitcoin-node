@@ -337,18 +337,65 @@
             (disk/open {:path path :network :regtest
                         :genesis-bytes
                         (fixture/hex->bytes fixture/regtest-genesis)})]
-        (doseq [value [main-1 main-2 side-1 side-2 side-3]]
+        (doseq [value [main-1 main-2]]
           (disk/accept-block! node (block/serialize value) 2000000000))
-        (let [expected (get-in side-3 [:header :hash-hex])
-              status (disk/consensus-status node)]
+        (disk/accept-block! node (block/serialize side-1) 2000000000)
+        (is (= 1 (:pending-blocks (disk/consensus-status node))))
+        (is (empty?
+             (:node-data
+              (storage/decode-value
+               (sqlite/host-state (:backend node))))))
+        (let [reopened (disk/open {:path path :network :regtest})]
+          (disk/accept-block!
+           reopened (block/serialize side-2) 2000000000)
+          (is (= 2 (:pending-blocks
+                    (disk/consensus-status reopened))))
+          (disk/accept-block!
+           reopened (block/serialize side-3) 2000000000)
+          (let [expected (get-in side-3 [:header :hash-hex])
+                status (disk/consensus-status reopened)]
           (is (= 3 (:height status)))
           (is (= expected (:best-block status)))
           (is (= 3 (:utxo-count status)))
-          (is (nil? (get-in @(:state node) [:nodes expected :undo])))
+            (is (= 0 (:pending-blocks status)))
+            (is (= 0 (:pending-bytes status)))
+          (is (nil? (get-in @(:state reopened)
+                            [:nodes expected :undo])))
           (is (= expected
                  (:best-block
                   (disk/consensus-status
-                   (disk/open {:path path :network :regtest}))))))))))
+                     (disk/open {:path path
+                                 :network :regtest})))))))))))
+
+(deftest pending-side-branch-limit-rolls-back-header-and-host-state
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            main-1 (mine-branch-block genesis 1 0)
+            side-1 (mine-branch-block genesis 1 1)
+            node
+            (disk/open
+             {:path path :network :regtest
+              :genesis-bytes
+              (fixture/hex->bytes fixture/regtest-genesis)
+              :pending-block-limit 0 :pending-byte-limit 0})
+            _ (disk/accept-block!
+               node (block/serialize main-1) 2000000000)
+            before (disk/consensus-status node)
+            error
+            (try
+              (disk/accept-block!
+               node (block/serialize side-1) 2000000000)
+              (catch clojure.lang.ExceptionInfo value value))]
+        (is (= :bitcoin.consensus/pending-block-limit
+               (:type (ex-data error))))
+        (is (= before (disk/consensus-status node)))
+        (is (nil? (sqlite/header-node
+                   (:backend node)
+                   (get-in side-1 [:header :hash-hex]))))
+        (is (= {:pending-blocks 0 :pending-bytes 0}
+               (sqlite/pending-status (:backend node))))))))
 
 (deftest populated-utxo-without-host-state-fails-closed
   (with-store

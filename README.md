@@ -30,8 +30,13 @@ headers and blocks, selects the most-work chain, and atomically commits the
 resulting UTXO delta, active-chain undo journals, and checksummed fork-choice
 metadata to one SQLite database. Header-only progress, side-chain blocks,
 multi-block reorganizations, and process restarts retain one consistent
-security boundary. Active block bodies are pruned from metadata after commit;
-a detached branch must be fetched again before a later reactivation.
+security boundary. Block bodies never enter the checksummed EDN host metadata.
+Validated side-branch bodies are retained as bounded raw SQLite values and
+rehydrated only along a candidate activation path. Attached staging rows are
+deleted in the same UTXO reorganization transaction; a detached branch must
+be fetched again before a later reactivation. Defaults retain at most 288
+blocks and 512 MiB, configurable with `:pending-block-limit` and
+`:pending-byte-limit`.
 Normalized headers are exposed through an immutable lazy map with a bounded
 LRU and write overlay, so normal restart reads only compact host metadata plus
 the active and best tips. A bounded block locator is persisted with that
@@ -152,7 +157,9 @@ Atomic disk-backed validation:
   (disk-consensus/open
    {:network :mainnet
     :genesis-bytes raw-genesis-block
-    :path "data/mainnet-consensus.sqlite"}))
+    :path "data/mainnet-consensus.sqlite"
+    :pending-block-limit 288
+    :pending-byte-limit (* 512 1024 1024)}))
 
 (disk-consensus/accept-header! durable raw-80-byte-header unix-time)
 (disk-consensus/accept-block! durable raw-block unix-time)

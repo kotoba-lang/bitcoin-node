@@ -2,9 +2,9 @@
   "A durable full-consensus host backed by the transactional SQLite UTXO set.
 
   Header/fork-choice metadata, the active UTXO delta, and active-chain undo
-  journals share one commit boundary. Active block bodies and undo values are
-  pruned from the metadata blob after commit; side-chain bodies are retained
-  until they are either activated or explicitly resubmitted."
+  journals share one commit boundary. Block bodies never enter the host
+  metadata blob. Validated side-branch bodies use bounded raw SQLite staging
+  until activation, when they are consumed by the same UTXO transaction."
   (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
@@ -18,29 +18,29 @@
             [kotobase.bitcoin.protocol :as header]))
 
 (defrecord DiskConsensusNode
-  [state backend verify-script network background])
+  [state backend verify-script network background pending-limits])
 
 (def ^:private disk-coins-key ::disk-backed)
+(def default-pending-block-limit 288)
+(def default-pending-byte-limit (* 512 1024 1024))
 
 (defn- disk-coins [coin-count]
   {disk-coins-key true :coin-count coin-count})
 
 (declare overlay-or-all)
 
-(defn- strip-active-data
+(defn- strip-node-data
   [state coin-count]
   (-> state
       (assoc-in [:utxo :coins] (disk-coins coin-count))
       (update
        :nodes
        (fn [nodes]
-         ;; Durable normalized rows already contain no block body or undo.
-         ;; Only the immutable overlay can have acquired either during the
-         ;; current transition, so a lazy index never walks the full chain.
+         ;; Block bodies are staged as bounded raw SQLite values. Undo is in
+         ;; the active journal. Neither belongs in checksummed host metadata.
          (reduce-kv
           (fn [result hash node]
-            (if (and (:active? node)
-                     (or (some? (:block node)) (some? (:undo node))))
+            (if (or (some? (:block node)) (some? (:undo node)))
               (assoc result hash (assoc node :block nil :undo nil))
               result))
           nodes
@@ -188,6 +188,60 @@
               extras))
        (lazy-nodes backend extras)))))
 
+(defn- raw-block-bytes [parsed]
+  (byte-array (map unchecked-byte (block/serialize parsed))))
+
+(defn- pending-options [pending-limits]
+  {:maximum-count (:maximum-count pending-limits)
+   :maximum-bytes (:maximum-bytes pending-limits)})
+
+(defn- migrate-host-block-data!
+  [backend state durable pending-limits]
+  (let [data (node-data (:nodes state))]
+    (if (empty? data)
+      state
+      (let [store
+            (into {}
+                  (keep
+                   (fn [[hash {:keys [block]}]]
+                     (when (and block
+                                (not (get-in state
+                                             [:nodes hash :active?])))
+                       [hash (raw-block-bytes block)])))
+                  data)
+            stripped
+            (strip-node-data state (:coin-count durable))]
+        (sqlite/save-host-headers-and-pending!
+         backend (:tip durable) (:height durable)
+         (encode-host-state stripped) []
+         (assoc (pending-options pending-limits) :store store))
+        stripped))))
+
+(defn- hydrate-pending-branch
+  [state backend parent-hash]
+  (loop [state state hash parent-hash]
+    (let [node (get-in state [:nodes hash])]
+      (cond
+        (or (nil? hash) (nil? node) (:active? node))
+        state
+
+        (:block node)
+        (recur state (:parent node))
+
+        :else
+        (if-let [raw (sqlite/pending-block backend hash)]
+          (let [parsed
+                (block/parse
+                 (mapv #(bit-and 0xff %) raw))
+                actual (get-in parsed [:header :hash-hex])]
+            (when-not (= hash actual)
+              (fail! :bitcoin.node/corrupt-pending-block
+                     "Staged block does not match its normalized header."
+                     {:expected hash :actual actual}))
+            (recur (assoc-in state [:nodes hash :block] parsed)
+                   (:parent node)))
+          state)))))
+
 (defn- load-or-migrate-host-state!
   [backend bytes network durable]
   (let [value (storage/decode-value bytes)]
@@ -238,7 +292,7 @@
              view
              (utxo/coin-entries (get-in initialized [:utxo :coins])))
             coin-count (utxo/coin-count seeded)
-            durable (strip-active-data initialized coin-count)]
+            durable (strip-node-data initialized coin-count)]
         (sqlite/commit-transition!
          seeded
          {:expected-tip nil
@@ -288,7 +342,7 @@
       (fn [loaded]
         (let [activated (assumeutxo/activate header-state loaded)
               coin-count (get-in loaded [:snapshot :coins-count])
-              durable (strip-active-data activated coin-count)]
+              durable (strip-node-data activated coin-count)]
           (vreset! result durable)
           (encode-host-state durable)))
       :header-nodes-fn
@@ -303,13 +357,29 @@
   database without matching host metadata is rejected instead of guessing its
   header or fork-choice state."
   [{:keys [path datasource network genesis-bytes verify-script
-           busy-timeout-ms snapshot-source header-state snapshot-options]
-    :or {busy-timeout-ms 5000}}]
+           busy-timeout-ms snapshot-source header-state snapshot-options
+           pending-block-limit pending-byte-limit]
+    :or {busy-timeout-ms 5000
+         pending-block-limit default-pending-block-limit
+         pending-byte-limit default-pending-byte-limit}}]
   (when-not (contains? chainstate/consensus-parameters network)
     (fail! :bitcoin.node/unsupported-consensus-network
            "The disk consensus host has no parameters for this network."
            {:network network}))
-  (let [backend
+  (when-not (and (integer? pending-block-limit)
+                 (<= 0 pending-block-limit
+                     sqlite/maximum-pending-block-count)
+                 (integer? pending-byte-limit)
+                 (<= 0 pending-byte-limit
+                     sqlite/maximum-pending-total-bytes))
+    (fail! :bitcoin.node/pending-block-configuration
+           "Pending side-branch staging bounds are invalid."
+           {:pending-block-limit pending-block-limit
+            :pending-byte-limit pending-byte-limit}))
+  (let [pending-limits
+        {:maximum-count pending-block-limit
+         :maximum-bytes pending-byte-limit}
+        backend
         (sqlite/open {:path path :datasource datasource :network network
                       :busy-timeout-ms busy-timeout-ms})
         durable (sqlite/status backend)
@@ -347,12 +417,15 @@
           (fail! :bitcoin.node/missing-disk-consensus-state
                  "A populated UTXO database lacks atomic consensus metadata."
                  {:network network :height (:height durable)
-                  :tip (:tip durable)}))]
+                  :tip (:tip durable)}))
+        migrated
+        (migrate-host-block-data!
+         backend initial durable pending-limits)]
     (->DiskConsensusNode
-     (atom (if (lazy-header-map/lazy-header-map? (:nodes initial))
-             initial
-             (compact-state backend initial)))
-     backend verify-script network nil)))
+     (atom (if (lazy-header-map/lazy-header-map? (:nodes migrated))
+             migrated
+             (compact-state backend migrated)))
+     backend verify-script network nil pending-limits)))
 
 (defn- header-genesis-bytes [header-state]
   (when header-state
@@ -369,7 +442,8 @@
   [{:keys [path network genesis-bytes verify-script
            busy-timeout-ms header-state
            background-path background-datasource
-           background-genesis-bytes]
+           background-genesis-bytes
+           pending-block-limit pending-byte-limit]
     :as options}]
   (let [node (open-single options)
         assumed? (= :assumed (get-in @(:state node) [:snapshot :status]))]
@@ -391,12 +465,17 @@
               (or background-genesis-bytes genesis-bytes
                   (header-genesis-bytes header-state))
               :verify-script verify-script
-              :busy-timeout-ms (or busy-timeout-ms 5000)})]
+              :busy-timeout-ms (or busy-timeout-ms 5000)
+              :pending-block-limit
+              (or pending-block-limit default-pending-block-limit)
+              :pending-byte-limit
+              (or pending-byte-limit default-pending-byte-limit)})]
         (assoc node :background background)))))
 
 (defn consensus-status [node]
   (let [state @(:state node)
         durable (sqlite/status (:backend node))
+        pending (sqlite/pending-status (:backend node))
         tip (:active-tip state)
         best (:best-header state)
         assumed? (= :assumed (get-in state [:snapshot :status]))
@@ -412,6 +491,12 @@
      :best-header-height (get-in state [:nodes best :height])
      :chainwork (get-in state [:nodes tip :chainwork])
      :utxo-count (:coin-count durable)
+     :pending-blocks (:pending-blocks pending)
+     :pending-bytes (:pending-bytes pending)
+     :pending-block-limit
+     (get-in node [:pending-limits :maximum-count])
+     :pending-byte-limit
+     (get-in node [:pending-limits :maximum-bytes])
      :fully-validated?
      (and (not= :assumed (get-in state [:snapshot :status]))
           (true? (get-in state [:nodes tip :block-valid?])))
@@ -457,7 +542,7 @@
            (chainstate/accept-headers
             before parsed now))
           durable (sqlite/status (:backend node))
-          stripped (strip-active-data after (:coin-count durable))]
+          stripped (strip-node-data after (:coin-count durable))]
       (validate-durable-tip! before durable)
       (sqlite/save-host-and-headers!
        (:backend node) (:tip durable) (:height durable)
@@ -674,7 +759,7 @@
             (-> validated
                 (assoc-in [:nodes base :block-valid?] true)
                 (assoc-in [:nodes base :scripts-checked?] true)
-                (strip-active-data (:coin-count foreground-status)))]
+                (strip-node-data (:coin-count foreground-status)))]
         (sqlite/save-host-and-headers!
          (:backend node) (:tip foreground-status)
          (:height foreground-status) (encode-host-state promoted)
@@ -736,11 +821,21 @@
           durable-before (sqlite/status backend)
           before @(:state node)
           _ (validate-durable-tip! before durable-before)
-          view (sqlite/begin backend)]
-      (try
-        (let [hydrated (assoc-in before [:utxo :coins] view)
-              parsed (block/parse raw-block)
-              parsed-hash (get-in parsed [:header :hash-hex])
+          parsed (block/parse raw-block)
+          parsed-hash (get-in parsed [:header :hash-hex])
+          parent-hash
+          (header/natural-hash->hex
+           (get-in parsed [:header :prev-block]))
+          raw-bytes
+          (byte-array (map unchecked-byte raw-block))]
+      (if (true? (get-in before
+                         [:nodes parsed-hash :block-valid?]))
+        (consensus-status node)
+        (let [branch-state
+              (hydrate-pending-branch before backend parent-hash)
+              view (sqlite/begin backend)]
+          (try
+            (let [hydrated (assoc-in branch-state [:utxo :coins] view)
               after
               (advance-locator
                before
@@ -750,7 +845,7 @@
               active-changed?
               (not= (:active-tip before) (:active-tip after))
               coin-count (utxo/coin-count (get-in after [:utxo :coins]))
-              stripped (strip-active-data after coin-count)]
+              stripped (strip-node-data after coin-count)]
           (if active-changed?
             (let [{:keys [detach attach]}
                   (transition-paths before after)]
@@ -765,15 +860,18 @@
                 :header-nodes
                 (selected-nodes stripped
                                 (concat [parsed-hash] detach attach))
+                :pending-delete attach
                 :host-state-bytes (encode-host-state stripped)}))
             (do
               (sqlite/rollback! view)
-              (sqlite/save-host-and-headers!
+              (sqlite/save-host-headers-and-pending!
                backend (:tip durable-before) (:height durable-before)
                (encode-host-state stripped)
-               (selected-nodes stripped [parsed-hash]))))
-          (reset! (:state node) (compact-state backend stripped))
-          (consensus-status node))
-        (catch Throwable error
-          (sqlite/rollback! view)
-          (throw error))))))
+               (selected-nodes stripped [parsed-hash])
+               (assoc (pending-options (:pending-limits node))
+                      :store {parsed-hash raw-bytes}))))
+              (reset! (:state node) (compact-state backend stripped))
+              (consensus-status node))
+            (catch Throwable error
+              (sqlite/rollback! view)
+              (throw error))))))))

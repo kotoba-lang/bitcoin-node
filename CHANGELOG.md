@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.0 — 2026-07-30
+
+- Move validated side-branch block bodies out of checksummed EDN host metadata
+  into schema-v5 bounded raw SQLite staging.
+- Rehydrate only the candidate ancestry needed for activation after restart,
+  then consume attached staged blocks in the same atomic UTXO reorganization.
+- Expose pending block count/bytes and configured limits in consensus status.
+- Enforce configurable count and byte ceilings; a limit failure rolls back
+  the candidate header, staged body, and host metadata together.
+- Upgrade to `bitcoin-consensus` v0.11.0 for foreign-key-bound pending storage.
+
 ## 0.15.0 — 2026-07-30
 
 - Replace eager normalized-header materialization with a map-compatible lazy
