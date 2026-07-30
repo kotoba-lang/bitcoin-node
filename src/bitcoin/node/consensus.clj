@@ -1,11 +1,14 @@
 (ns bitcoin.node.consensus
   "Thread-safe host adapter for the pure bitcoin-consensus chainstate."
   (:require [bitcoin.consensus.block :as block]
+            [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.chainstate :as chainstate]
-            [bitcoin.consensus.storage :as storage])
+            [bitcoin.consensus.storage :as storage]
+            [kotobase.bitcoin.protocol :as header])
   (:import (java.nio.file Files LinkOption Path)))
 
-(defrecord ConsensusNode [state verify-script snapshot-path])
+(defrecord ConsensusNode
+  [state background-state verify-script snapshot-path])
 
 (defn- existing-snapshot? [path]
   (and path
@@ -18,25 +21,45 @@
   Existing snapshots are network-bound; otherwise raw genesis bytes initialize
   state."
   [{:keys [network genesis-bytes verify-script snapshot-path]}]
-  (let [initial
+  (let [background-path (when snapshot-path
+                          (str snapshot-path ".background"))
+        initial
         (if (existing-snapshot? snapshot-path)
           (storage/load! snapshot-path network)
           (chainstate/initialize network (block/parse genesis-bytes)
-                                 verify-script))]
-    (->ConsensusNode (atom initial) verify-script snapshot-path)))
+                                 verify-script))
+        background
+        (when (existing-snapshot? background-path)
+          (storage/load! background-path network))
+        _ (when (and (= :assumed (get-in initial [:snapshot :status]))
+                     (nil? background))
+            (throw
+             (ex-info
+              "AssumeUTXO state is missing its background chainstate."
+              {:type :bitcoin.node/missing-background-chainstate})))]
+    (->ConsensusNode (atom initial) (atom background)
+                     verify-script snapshot-path)))
 
 (defn consensus-status [node]
   (let [state @(:state node)
         tip (:active-tip state)
-        current (get-in state [:nodes tip])]
+        current (get-in state [:nodes tip])
+        best-header (:best-header state)
+        background @(:background-state node)]
     {:status :connected
      :backend :embedded-consensus
      :network (:network state)
      :height (:height current)
      :best-block tip
+     :best-header best-header
+     :best-header-height (get-in state [:nodes best-header :height])
      :chainwork (:chainwork current)
      :utxo-count (count (get-in state [:utxo :coins]))
      :fully-validated? (true? (:block-valid? current))
+     :snapshot-status (get-in state [:snapshot :status])
+     :background-height
+     (when background
+       (chainstate/active-height background))
      :persistent? (boolean (:snapshot-path node))}))
 
 (defn ready? [node]
@@ -61,3 +84,95 @@
               (storage/save! path after))
             (consensus-status node))
           (recur))))))
+
+(defn accept-header!
+  "Validate and atomically index one raw 80-byte block header without
+  activating block or UTXO state."
+  [node raw-header now]
+  (let [parsed (header/decode-block-header (vec raw-header))]
+    (loop []
+      (let [before @(:state node)
+            after (chainstate/accept-header before parsed now)]
+        (if (compare-and-set! (:state node) before after)
+          (do
+            (when-let [path (:snapshot-path node)]
+              (storage/save! path after))
+            (consensus-status node))
+          (recur))))))
+
+(defn- best-header-hash-at-height [state height]
+  (loop [hash (:best-header state)]
+    (let [current (get-in state [:nodes hash])]
+      (cond
+        (nil? current) nil
+        (= height (:height current)) hash
+        (< (:height current) height) nil
+        :else (recur (:parent current))))))
+
+(defn load-assumeutxo!
+  "Authenticate and activate a Bitcoin Core v2 UTXO snapshot.
+
+  The pre-snapshot state is retained separately and must be advanced through
+  `accept-background-block!` before the snapshot becomes fully validated."
+  ([node source]
+   (load-assumeutxo! node source {}))
+  ([node source options]
+   (locking node
+     (let [before @(:state node)
+           loaded
+           (assumeutxo/load-snapshot
+            source (:network before)
+            #(best-header-hash-at-height before %)
+            options)
+           activated (assumeutxo/activate before loaded)]
+       (reset! (:background-state node) before)
+       (reset! (:state node) activated)
+       (when-let [path (:snapshot-path node)]
+         (storage/save! path activated)
+         (storage/save! (str path ".background") before))
+       (consensus-status node)))))
+
+(defn accept-background-block!
+  "Fully validate one historical block behind an assumed snapshot. When the
+  snapshot base is reached, recompute its UTXO commitment and promote it."
+  [node raw-block now]
+  (locking node
+    (let [background @(:background-state node)]
+      (when-not background
+        (throw (ex-info "No AssumeUTXO background validation is active."
+                        {:type :bitcoin.node/no-background-validation})))
+      (let [parsed (block/parse raw-block)
+            after
+            (chainstate/accept-block
+             background parsed now (:verify-script node))
+            snapshot-state @(:state node)
+            base-height (get-in snapshot-state
+                                [:snapshot :base-height])
+            completed? (= base-height (chainstate/active-height after))]
+        (reset! (:background-state node)
+                (when-not completed? after))
+        (when completed?
+          (let [validated
+                (assumeutxo/validate-background
+                 {:snapshot (:snapshot snapshot-state)}
+                 after)
+                base (:active-tip snapshot-state)
+                validated-node (get-in after [:nodes base])]
+            (reset! (:state node)
+                    (-> snapshot-state
+                        (assoc :snapshot (:snapshot validated))
+                        (update-in
+                         [:nodes base]
+                         merge
+                         (select-keys validated-node
+                                      [:block :undo :deployments])
+                         {:block-valid? true
+                          :scripts-checked? true})))))
+        (when-let [path (:snapshot-path node)]
+          (storage/save! path @(:state node))
+          (if completed?
+            (Files/deleteIfExists
+             (Path/of (str path ".background")
+                      (make-array String 0)))
+            (storage/save! (str path ".background") after)))
+        (consensus-status node)))))

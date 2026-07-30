@@ -20,6 +20,8 @@ It also exposes an opt-in embedded host around
 [`bitcoin-consensus`](https://github.com/kotoba-lang/bitcoin-consensus).
 `bitcoin.node.consensus/open` uses its in-process Script VM, validates raw
 blocks before atomically publishing state, and can persist checksummed
+chainstate. It supports headers-first indexing and authenticated Bitcoin Core
+v2 AssumeUTXO activation while retaining a separate fully validated background
 chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
 
@@ -90,8 +92,16 @@ Embedded validation:
     :snapshot-path "data/mainnet-chainstate.edn"}))
 
 (consensus/accept-block! embedded raw-block unix-time)
+(consensus/accept-header! embedded raw-80-byte-header unix-time)
+(consensus/load-assumeutxo! embedded core-snapshot-input-stream)
+(consensus/accept-background-block! embedded historical-raw-block unix-time)
 (consensus/consensus-status embedded)
 ```
+
+An AssumeUTXO state reports `:snapshot-status :assumed` until background
+validation reaches the exact base and recomputes the pinned UTXO commitment.
+The assumed and background chainstates are persisted separately; startup fails
+closed if an assumed state has lost its background state.
 
 `core/scan-blocks` requires a discovered, fully synchronized basic block
 filter index and otherwise fails with `:bitcoin.node/capability-unavailable`.

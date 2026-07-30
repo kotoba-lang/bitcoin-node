@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0 — 2026-07-30
+
+- Upgrade the embedded kernel to `bitcoin-consensus` v0.5.1.
+- Expose atomic headers-first indexing without premature block activation.
+- Authenticate and activate Core v2 AssumeUTXO snapshots while retaining a
+  separate background chainstate.
+- Promote snapshots only after full historical validation reproduces the
+  pinned base commitment; fail closed when background state is unavailable.
+- Report best-header, snapshot, and background-validation progress explicitly.
+
+## 0.5.2 — 2026-07-30
+
+- Upgrade the embedded consensus kernel to v0.4.2.
+
+## 0.5.1 — 2026-07-30
+
+- Upgrade the embedded consensus kernel to v0.4.1.
+
+## 0.5.0 — 2026-07-30
+
+- Use the built-in consensus Script verifier by default.
+
 ## 0.4.1 — 2026-07-30
 
 - Upgrade the embedded kernel to `bitcoin-consensus` v0.3.0 for overflow-safe
