@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.33.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.31.0 so `assumevalid` Script skipping uses
+  Core's exact 256-bit proof-equivalent-time rounding.
+- Keep Script verification fail-closed throughout the former two-week
+  approximation gap.
+
 ## 0.32.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.30.0 for Bitcoin Core-identical compact
