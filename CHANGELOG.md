@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.35.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.33.0 for Core-identical legacy
+  `SignatureHash` `OP_CODESEPARATOR` serialization.
+- Pin all 1,936 Core Script, transaction, and legacy sighash outcomes in the
+  upstream kernel CI with no skipped vectors.
+
 ## 0.34.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.32.0 so transaction versions retain Core's
