@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.46.0 — 2026-07-31
+
+- Exercise the real Core RPC to raw-block to disk-consensus to
+  `hash_serialized_3` full-history boundary in CI with a checksum-pinned
+  Bitcoin Core v31.1 binary.
+- Prove both zero-work durable resume and fail-closed rejection after Core
+  replaces the persisted tip, without emitting false success evidence.
+
 ## 0.45.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.37.0 for explicit Bitcoin Core-compatible

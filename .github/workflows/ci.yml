@@ -40,3 +40,35 @@ jobs:
           for script in scripts/*.sh; do
             bash -n "$script"
           done
+
+  full-history-regtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: DeLaGuardo/setup-clojure@13.1
+        with:
+          cli: latest
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2
+            ~/.gitlibs
+          key: ${{ runner.os }}-full-history-clj-${{ hashFiles('deps.edn') }}
+      - name: Install checksum-pinned Bitcoin Core 31.1
+        env:
+          BITCOIN_CORE_ARCHIVE_SHA256: b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e
+        run: |
+          archive="$RUNNER_TEMP/bitcoin-31.1-x86_64-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location \
+            https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' "$BITCOIN_CORE_ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/bitcoin-31.1/bin" >> "$GITHUB_PATH"
+      - name: Exercise resumable full-history boundary
+        run: ./scripts/core_full_history_regtest.sh

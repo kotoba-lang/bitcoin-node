@@ -431,6 +431,14 @@ CONSENSUS_EVIDENCE_PATH="/absolute/full-history-evidence.json" \
 ./scripts/core_full_history_differential.sh
 ```
 
+CI runs the same boundary against checksum-pinned Bitcoin Core v31.1 on a
+fresh regtest chain. It validates the first import, a zero-work durable resume,
+and rejection of a replaced Core tip without writing false success evidence:
+
+```bash
+./scripts/core_full_history_regtest.sh
+```
+
 If the target is not Core's current tip, provide its previously captured
 `CONSENSUS_EXPECTED_UTXO_HASH`. A pruned Core is accepted only when the durable
 kernel resume height is at or above its retained block range.
