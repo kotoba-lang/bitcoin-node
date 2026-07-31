@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.28.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.26.0 for Core-identical retroactive
+  P2SH/WITNESS/TAPROOT validation across historical block replay.
+- Preserve active DERSIG/CLTV/CSV/NULLDUMMY checks at the historical Taproot
+  exception block while disabling Taproot alone.
+
 ## 0.27.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.25.0 so excessive legacy sigops are

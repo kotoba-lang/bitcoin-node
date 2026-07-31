@@ -29,6 +29,8 @@ including unknown witness versions reserved for future soft forks.
 Block validation rejects all witness serialization before the network's
 SegWit activation height, even when a coinbase commitment is present, and
 enforces BIP141 commitments only after activation.
+Prevout Script validation independently follows Core's retroactive
+P2SH/WITNESS/TAPROOT flags and exact historical exception composition.
 The disk UTXO layer matches Core's `IsUnspendable` rule for `OP_RETURN` and
 scripts above 10,000 bytes; schema-v7 migration repairs legacy current coins
 but requires authenticated reindex when undo proves an impossible spend.
