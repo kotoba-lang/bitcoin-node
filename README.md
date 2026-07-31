@@ -26,6 +26,9 @@ chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
 Transaction decoding uses weight-derived input, output, and witness limits,
 including unknown witness versions reserved for future soft forks.
+Block validation rejects all witness serialization before the network's
+SegWit activation height, even when a coinbase commitment is present, and
+enforces BIP141 commitments only after activation.
 The disk UTXO layer matches Core's `IsUnspendable` rule for `OP_RETURN` and
 scripts above 10,000 bytes; schema-v7 migration repairs legacy current coins
 but requires authenticated reindex when undo proves an impossible spend.
