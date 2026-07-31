@@ -30,4 +30,7 @@
                "--fail-threshold" "70"]}
   :core-blockfilter-vectors
   {:extra-paths ["test"]
-   :main-opts ["-m" "bitcoin.node.core-blockfilter-vectors"]}}}
+   :main-opts ["-m" "bitcoin.node.core-blockfilter-vectors"]}
+  :fuzz
+  {:extra-paths ["test"]
+   :main-opts ["-m" "bitcoin.node.fuzz"]}}}

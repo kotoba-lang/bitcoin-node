@@ -39,3 +39,13 @@ inside the same bounded cycle after preserving its committed prefix; local
 verifier, pruned history, missing body, SQLite, and resource-limit failures
 stop without peer attribution or branch invalidation. Operators must recover
 the local capability or data before resuming synchronization.
+
+All live inbound frame, version, and headers decoding must pass through
+`bitcoin.node.wire`. It enforces protocol payload and user-agent bounds,
+canonical CompactSize values, printable/NUL-padded command bytes, checksum and
+network binding, and exact input consumption. Its public decoder surface must
+return only values or typed `bitcoin.node/*` failures for hostile bytes.
+Deterministic fuzzing continuously exercises that boundary, compact filters,
+and SQLite fork/reopen transitions. Fuzzing is defense in depth; it does not
+replace Bitcoin Core differential vectors, independent review, or a complete
+genesis-to-tip validation run.

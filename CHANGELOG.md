@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.49.0 — 2026-07-31
+
+- Add a fail-closed node-owned P2P wire boundary for canonical command bytes,
+  exact authenticated frames, bounded version user agents, canonical
+  CompactSize values, and exactly consumed headers payloads.
+- Route the live peer handshake and header-sync decoder through typed node
+  failures instead of allowing dependency assertions or host indexing errors
+  to escape.
+- Add seed-replayable fuzzing for P2P frames, version and headers payloads,
+  compact filters, and an actual SQLite main/side-chain reorganization with an
+  integrity check and reopen after every block.
+- Run 20,000 wire cases plus the durable fork scenario on every change and
+  400,000 wire cases per seed in a four-seed nightly matrix.
+
 ## 0.48.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.38.0, whose transaction, block, legacy

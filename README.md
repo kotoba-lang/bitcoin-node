@@ -27,6 +27,13 @@ security boundary documented by `bitcoin-consensus` still applies.
 The pinned kernel release additionally fails CI on host exceptions, untyped
 decoder failures, non-canonical raw round trips, or process timeout under a
 replayable transaction/block/legacy-Script/tapscript fuzz corpus.
+The node-owned wire boundary applies the same discipline to complete P2P
+frames, command bytes, version messages, headers messages, and compact filters.
+Its state-machine corpus then mines competing regtest branches into the real
+SQLite host, verifies integrity and active ancestry after every transition,
+reopens after every block, exercises a longer-chain reorganization, and proves
+that a mutated block fails with typed evidence. Every-change and nightly runs
+print the seed and exact target count so failures can be replayed locally.
 Transaction decoding uses weight-derived input, output, and witness limits,
 including unknown witness versions reserved for future soft forks. Transaction
 versions retain Core's unsigned 32-bit wire value, so values above
@@ -160,6 +167,7 @@ chains, commitment overruns, and equivocation fail over with typed evidence.
 clojure -M:test
 clojure -M:lint
 clojure -M:coverage
+clojure -M:fuzz 21000000 5000
 ./scripts/core_blockfilter_vectors.sh
 ```
 

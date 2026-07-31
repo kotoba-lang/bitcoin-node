@@ -7,6 +7,7 @@
             [bitcoin.consensus.sync :as sync]
             [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.headers-sync :as headers-sync]
+            [bitcoin.node.wire :as wire]
             [clojure.string :as str]
             [kotobase.bitcoin.protocol :as protocol])
   (:import [java.io DataInputStream DataOutputStream EOFException]
@@ -84,25 +85,14 @@
 (defn- read-message-until!
   [connection deadline operation expected-magic]
   (let [header
-        (protocol/decode-message-header
+        (wire/decode-message-header
          (read-exactly-until
-          connection deadline operation protocol/header-size))
-        length (:length header)]
-    (when-not (= expected-magic (:magic header))
-      (fail! :bitcoin.node/peer-network-mismatch
-             "Bitcoin peer sent another network's magic."
-             {:expected expected-magic :actual (:magic header)}))
-    (when (> length protocol/max-protocol-payload-bytes)
-      (fail! :bitcoin.node/peer-oversized-message
-             "Bitcoin peer declared an oversized payload."
-             {:length length :limit protocol/max-protocol-payload-bytes}))
-    (let [payload
-          (read-exactly-until connection deadline operation length)]
-      (when-not (protocol/checksum-valid? header payload)
-        (fail! :bitcoin.node/peer-checksum
-               "Bitcoin peer message checksum is invalid."
-               {:command (:command header)}))
-      {:command (:command header) :payload payload})))
+         connection deadline operation protocol/header-size)
+         expected-magic)
+        payload
+        (read-exactly-until
+         connection deadline operation (:length header))]
+    (wire/decode-message-payload header payload)))
 
 (defn- positive-nonce []
   (bit-and (.nextLong (SecureRandom.)) Long/MAX_VALUE))
@@ -120,7 +110,7 @@
     (do
       (write-message! (:output connection) (:magic connection)
                       "verack" [])
-      [:version (protocol/decode-version-payload payload)])
+      [:version (wire/decode-version-payload payload)])
 
     "verack" :verack
     nil))
@@ -236,7 +226,7 @@
                connection deadline :headers (:magic connection))
               _ (handle-control! connection message)]
           (if (= "headers" (:command message))
-            (protocol/decode-headers-payload (:payload message))
+            (wire/decode-headers-payload (:payload message))
             ;; Unknown announcements are deliberately ignored; this client
             ;; never changes behavior based on inv/addr/feefilter traffic.
             (recur))))
