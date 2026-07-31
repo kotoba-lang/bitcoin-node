@@ -507,6 +507,62 @@
        (is (= :wrong-block
               (get-in result [:failures 0 :reason])))))))
 
+(deftest block-download-correlates-only-the-header-and-defers-body-consensus
+  (let [genesis
+        (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+        value (fixture/mine-regtest-block genesis 1)
+        requested (get-in value [:header :hash])
+        raw (block/serialize value)
+        bad-merkle-body (update raw (dec (count raw)) bit-xor 1)]
+    (is (= :bitcoin.consensus/bad-merkle-root
+           (:type
+            (ex-data
+             (try
+               (block/parse bad-merkle-body)
+               (catch clojure.lang.ExceptionInfo error error))))))
+    (with-redefs
+     [peer/connect!
+      (fn [_] {:peer-version {:services 1}})
+      peer/close! (constantly nil)
+      peer/get-block! (fn [& _] bad-merkle-body)]
+      (let [result
+            (peer/download-blocks-from-peers!
+             [{:host "body-provider" :network :regtest}]
+             [requested] {:parallel-peers 1})]
+        (is (= [bad-merkle-body] (:blocks result)))
+        (is (= ["body-provider"]
+               (mapv :host (:block-sources result))))
+        (is (empty? (:failures result))
+            "the disk consensus owner classifies the correlated body")))))
+
+(deftest malformed-block-header-is-severe-response-mismatch
+  (let [genesis
+        (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+        value (fixture/mine-regtest-block genesis 1)
+        requested (get-in value [:header :hash])]
+    (with-redefs
+     [peer/connect!
+      (fn [{:keys [host]}]
+        {:id host :peer-version {:services 1}})
+      peer/close! (constantly nil)
+      peer/get-block!
+      (fn [connection _]
+        (if (= "malformed" (:id connection))
+          [0 1 2]
+          (block/serialize value)))]
+      (let [result
+            (peer/download-blocks-from-peers!
+             [{:host "malformed" :network :regtest}
+              {:host "honest" :network :regtest}]
+             [requested] {:parallel-peers 1})]
+        (is (= ["honest"] (mapv :host (:block-sources result))))
+        (is (= :bitcoin.node/block-response-mismatch
+               (get-in result [:failures 0 :type])))
+        (is (= :malformed-block-header
+               (get-in result [:failures 0 :reason])))
+        (is (= :bitcoin.consensus/truncated
+               (get-in result [:failures 0 :validation-type])))))))
+
 (deftest block-download-exhaustion-retains-every-typed-peer-failure
   (let [hash (vec (repeat 32 1))]
     (with-redefs

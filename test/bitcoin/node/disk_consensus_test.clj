@@ -2,6 +2,7 @@
   (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
+            [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.transaction :as transaction]
@@ -86,6 +87,26 @@
             decoded (header/decode-block-header bytes)]
         (if (header/hash-meets-target? (:hash decoded) (:bits decoded))
           (block/parse (vec (concat bytes [1] (:raw tx))))
+          (recur (inc nonce)))))))
+
+(defn- mine-raw-block [parent transactions]
+  (let [merkle-root
+        (:root (block/merkle-root (mapv :txid-natural transactions)))
+        template
+        {:version 4
+         :prev-block (get-in parent [:header :hash])
+         :merkle-root merkle-root
+         :timestamp (inc (get-in parent [:header :timestamp]))
+         :bits 0x207fffff}
+        body
+        (vec (concat (codec/compact-size (count transactions))
+                     (mapcat transaction/serialize transactions)))]
+    (loop [nonce 0]
+      (let [header-bytes
+            (header/encode-block-header (assoc template :nonce nonce))
+            decoded (header/decode-block-header header-bytes)]
+        (if (header/hash-meets-target? (:hash decoded) (:bits decoded))
+          {:header decoded :raw (vec (concat header-bytes body))}
           (recur (inc nonce)))))))
 
 (deftest disk-consensus-persists-headers-blocks-and-restarts
@@ -739,6 +760,87 @@
                     :bitcoin.node/peer-invalid-block
                     {:pool-path "peer-pool.bin"}]
                    @feedback))))))))
+
+(deftest managed-sync-retries-a-merkle-mutated-copy-without-poisoning-header
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            value (fixture/mine-regtest-block genesis 1)
+            raw (block/serialize value)
+            bad-body (update raw (dec (count raw)) bit-xor 1)
+            source {:host "malleated-body" :network :regtest}
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            feedback (atom nil)]
+        (disk/accept-headers!
+         node [(get-in value [:header :bytes])] 2000000000)
+        (with-redefs
+         [peer-pool/download-blocks!
+          (fn [& _]
+            {:blocks [bad-body] :block-sources [source]
+             :observations [] :failures []})
+          peer-pool/report-block-validation-failure!
+          (fn [_ peer _ error-type _]
+            (reset! feedback [peer error-type]))]
+          (let [error
+                (try
+                  (disk/sync-blocks-managed!
+                   node (atom ::pool) 2000000000 {:max-blocks 1})
+                  (catch clojure.lang.ExceptionInfo value value))
+                status (disk/consensus-status node)]
+            (is (= :bitcoin.consensus/bad-merkle-root
+                   (:type (ex-data error))))
+            (is (chainstate/mutated-block-error? error))
+            (is (= [source :bitcoin.node/peer-mutated-block] @feedback))
+            (is (= 0 (:height status)))
+            (is (= 1 (:best-header-height status)))
+            (is (zero? (:invalid-blocks status)))))))))
+
+(deftest context-free-invalid-body-quarantines-its-indexed-header
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            invalid
+            (mine-raw-block genesis [(coinbase 1 1) (coinbase 1 2)])
+            source {:host "invalid-body" :network :regtest}
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            feedback (atom nil)]
+        (is (= :bitcoin.consensus/multiple-coinbase
+               (:type
+                (ex-data
+                 (try
+                   (block/parse (:raw invalid))
+                   (catch clojure.lang.ExceptionInfo error error))))))
+        (disk/accept-headers!
+         node [(get-in invalid [:header :bytes])] 2000000000)
+        (with-redefs
+         [peer-pool/download-blocks!
+          (fn [& _]
+            {:blocks [(:raw invalid)] :block-sources [source]
+             :observations [] :failures []})
+          peer-pool/report-block-validation-failure!
+          (fn [_ peer _ error-type _]
+            (reset! feedback [peer error-type]))]
+          (let [error
+                (try
+                  (disk/sync-blocks-managed!
+                   node (atom ::pool) 2000000000 {:max-blocks 1})
+                  (catch clojure.lang.ExceptionInfo value value))
+                status (disk/consensus-status node)]
+            (is (= :bitcoin.consensus/multiple-coinbase
+                   (:type (ex-data error))))
+            (is (chainstate/invalid-block-error? error))
+            (is (= [source :bitcoin.node/peer-invalid-block] @feedback))
+            (is (= 0 (:height status)))
+            (is (= 0 (:best-header-height status)))
+            (is (= 1 (:invalid-blocks status)))))))))
 
 (deftest disk-consensus-reorganizes-with-durable-undo
   (with-store

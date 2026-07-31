@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.42.0 — 2026-07-31
+
+- Restrict the parallel P2P stage to bounded raw transport plus requested
+  header-hash correlation; the SQLite consensus host now exclusively owns
+  complete body parsing and validation-result classification.
+- Quarantine indexed headers for definitive context-free body failures before
+  a UTXO view opens, while retrying Core-style Merkle mutations from another
+  severely cooled-down provider without poisoning the header.
+- Persist and expose the same source-peer evidence for early parse failures as
+  for contextual activation failures.
+- Treat truncated or undecodable 80-byte response headers as severe typed
+  response mismatches while retaining their bounded codec failure evidence.
+
 ## 0.41.1 — 2026-07-31
 
 - Preserve bounded source-peer and applied-feedback evidence on validation

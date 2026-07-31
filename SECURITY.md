@@ -30,7 +30,8 @@ Managed block synchronization keeps the network pipeline and chainstate
 publication as separate boundaries. Up to eight peers may download
 concurrently, but each is capped at 16 requests, the resident raw-block window
 is capped at 128, and one overall batch deadline actively closes stalled
-sockets. Parsed hashes must match their scheduler assignments, and only
-chronological full validation can publish SQLite state. Failed peers cannot
+sockets. Header hashes must match their scheduler assignments; complete body
+parsing and chronological validation happen only at the SQLite consensus
+boundary. Failed peers cannot
 make unfinished assignments disappear: they are requeued and the typed failure
 enters the durable cooldown history.

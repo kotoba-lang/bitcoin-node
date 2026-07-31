@@ -3,8 +3,7 @@
 
   It performs version/verack, answers ping, and requests headers in protocol
   batches. Transaction relay, wallet, mempool, and mining commands are absent."
-  (:require [bitcoin.consensus.block :as block]
-            [bitcoin.consensus.codec :as codec]
+  (:require [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sync :as sync]
             [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.headers-sync :as headers-sync]
@@ -560,7 +559,9 @@
       :type (or (:type data) :bitcoin.node/peer-error)
       :message (.getMessage ^Throwable error)
       :elapsed-ms elapsed-ms}
-      (:reason data) (assoc :reason (:reason data)))))
+      (:reason data) (assoc :reason (:reason data))
+      (:validation-type data)
+      (assoc :validation-type (:validation-type data)))))
 
 (defn- validate-block-download!
   [peer-configurations block-hashes parallel-peers per-peer-limit
@@ -674,9 +675,18 @@
             (try
               {:result
                (sync/process-block
-                state peer-id scheduler-hash (block/parse raw))}
+                state peer-id scheduler-hash
+                {:header
+                 (protocol/decode-block-header
+                  (first (codec/read-bytes (vec raw) 0 80)))})}
               (catch Throwable error
-                {:error error}))]
+                {:error
+                 (ex-info
+                  "Bitcoin peer returned a malformed block header."
+                  {:type :bitcoin.node/block-response-mismatch
+                   :reason :malformed-block-header
+                   :validation-type (:type (ex-data error))}
+                  error)}))]
         (if-let [error (:error attempt)]
           {:state (sync/disconnect state peer-id)
            :accepted accepted

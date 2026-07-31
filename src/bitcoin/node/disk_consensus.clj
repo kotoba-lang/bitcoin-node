@@ -981,7 +981,9 @@
     (catch clojure.lang.ExceptionInfo error
       (let [feedback-type
             (cond
-              (chainstate/invalid-block-error? error)
+              (or (chainstate/invalid-block-error? error)
+                  (= :invalid
+                     (chainstate/block-validation-result error)))
               :bitcoin.node/peer-invalid-block
 
               (chainstate/mutated-block-error? error)
@@ -1175,6 +1177,31 @@
       (promote-background! node)
       (consensus-status node))))
 
+(defn- quarantine-invalid-error!
+  [node before durable-before error]
+  (let [backend (:backend node)
+        {:keys [invalid-block-hash type]} (ex-data error)]
+    (when (and (chainstate/invalid-block-error? error)
+               (get-in before [:nodes invalid-block-hash]))
+      (let [marked
+            (advance-locator
+             before
+             (chainstate/mark-block-invalid
+              before invalid-block-hash type))
+            pending-delete
+            (->> (sqlite/pending-block-hashes backend)
+                 (filter #(chainstate/block-invalid? marked %))
+                 vec)
+            stripped
+            (strip-node-data marked (:coin-count durable-before))]
+        (sqlite/save-host-headers-and-pending!
+         backend (:tip durable-before) (:height durable-before)
+         (encode-host-state stripped) []
+         (assoc (pending-options (:pending-limits node))
+                :delete pending-delete))
+        (reset! (:state node) (compact-state backend stripped))
+        true))))
+
 (defn accept-block!
   "Validate one raw block and atomically publish its fork-choice, UTXO delta,
   active undo journals, and checksummed restart state."
@@ -1185,8 +1212,21 @@
           durable-before (sqlite/status backend)
           before @(:state node)
           _ (validate-durable-tip! before durable-before)
-          parsed (block/parse raw-block)
-          parsed-hash (get-in parsed [:header :hash-hex])
+          raw-vector (vec raw-block)
+          parsed-header
+          (header/decode-block-header
+           (first (codec/read-bytes raw-vector 0 80)))
+          parsed-hash (:hash-hex parsed-header)
+          parsed
+          (try
+            (block/parse raw-vector)
+            (catch clojure.lang.ExceptionInfo error
+              (let [annotated
+                    (chainstate/annotate-block-validation-error
+                     parsed-hash error)]
+                (quarantine-invalid-error!
+                 node before durable-before annotated)
+                (throw annotated))))
           parent-hash
           (header/natural-hash->hex
            (get-in parsed [:header :prev-block]))
@@ -1243,32 +1283,9 @@
               (consensus-status node))
             (catch Throwable error
               (sqlite/rollback! view)
-              (let [{:keys [invalid-block-hash type]} (ex-data error)]
-                (if (and (chainstate/invalid-block-error? error)
-                         (get-in before [:nodes invalid-block-hash]))
-                  (let [marked
-                        (advance-locator
-                         before
-                         (chainstate/mark-block-invalid
-                          before invalid-block-hash type))
-                        pending-delete
-                        (->> (sqlite/pending-block-hashes backend)
-                             (filter
-                              #(chainstate/block-invalid? marked %))
-                             vec)
-                        stripped
-                        (strip-node-data
-                         marked (:coin-count durable-before))]
-                    (sqlite/save-host-headers-and-pending!
-                     backend (:tip durable-before)
-                     (:height durable-before)
-                     (encode-host-state stripped) []
-                     (assoc (pending-options (:pending-limits node))
-                            :delete pending-delete))
-                    (reset! (:state node)
-                            (compact-state backend stripped))
-                    (throw error))
-                  (throw error))))))))))
+              (quarantine-invalid-error!
+               node before durable-before error)
+              (throw error))))))))
 
 (defn begin-reindex!
   "Open a non-destructive deep-reorganization rebuild target.

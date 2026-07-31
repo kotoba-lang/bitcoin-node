@@ -118,10 +118,12 @@ and can compare independently reported tips; only local validation and exact
 most-work fork choice select state. It deliberately has no transaction relay,
 mempool, wallet, signing, or mining commands. Best-chain blocks are scheduled
 across up to eight diverse peers, with at most 16 in-flight requests per peer
-and 128 raw blocks resident per window. Every response is correlated after
-parsing, unfinished work is requeued after a timeout or disconnect, and
+and 128 raw blocks resident per window. Every response is correlated from its
+80-byte header, unfinished work is requeued after a timeout or disconnect, and
 downloaded blocks are released in chronological order to the full consensus
-validator. One overall batch deadline actively closes stalled sockets rather
+validator. Complete parsing, Merkle-result classification, invalid-branch
+quarantine, and UTXO validation remain owned by the serial SQLite consensus
+boundary. One overall batch deadline actively closes stalled sockets rather
 than allowing 16 individual request timeouts to accumulate. SQLite publication
 remains one fully validated block at a time, so parallel network completion
 cannot expose a child before its parent.
