@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.27.0 so historical BIP30 replacement is
+  restricted to coinbase outputs.
+- Keep non-coinbase unspent-outpoint collisions fail-closed in embedded and
+  disk-backed block connection.
+
 ## 0.28.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.26.0 for Core-identical retroactive
