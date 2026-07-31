@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.22.0 so output scripts above Core's
+  10,000-byte execution limit are valid when created but never enter the UTXO
+  set.
+- Adopt transactional schema-v7 repair for legacy unspendable coins and
+  fail-closed authenticated reindex evidence for impossible historical spends.
+
 ## 0.23.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.21.0 so unknown witness versions retain
