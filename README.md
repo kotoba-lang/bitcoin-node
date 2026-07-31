@@ -25,7 +25,10 @@ v2 AssumeUTXO activation while retaining a separate fully validated background
 chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
 Transaction decoding uses weight-derived input, output, and witness limits,
-including unknown witness versions reserved for future soft forks.
+including unknown witness versions reserved for future soft forks. Transaction
+versions retain Core's unsigned 32-bit wire value, so values above
+`0x7fffffff` keep CSV and BIP68 enabled instead of being reinterpreted as
+negative.
 Block validation rejects all witness serialization before the network's
 SegWit activation height, even when a coinbase commitment is present, and
 enforces BIP141 commitments only after activation.

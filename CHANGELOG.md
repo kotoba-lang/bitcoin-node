@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.34.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.32.0 so transaction versions retain Core's
+  unsigned 32-bit CSV and BIP68 behavior above `0x7fffffff`.
+- Adopt `SCRIPT_VERIFY_CONST_SCRIPTCODE` compatibility and the permanent
+  214-vector Core transaction conformance harness.
+
 ## 0.33.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.31.0 so `assumevalid` Script skipping uses
