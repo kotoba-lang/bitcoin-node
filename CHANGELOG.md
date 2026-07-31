@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.39.0 — 2026-07-31
+
+- Connect the existing pure block scheduler to the real P2P, peer-pool, and
+  SQLite consensus path instead of downloading every block from one peer.
+- Fetch from up to eight diverse peers concurrently with Bitcoin Core's
+  16-block per-peer and 128-block resident-window bounds, while committing
+  fully validated blocks strictly in chain order.
+- Correlate every parsed block with its scheduler request, retain valid
+  prefixes, requeue unfinished work after disconnect or timeout, and fail
+  closed with typed evidence when all peers are exhausted.
+- Enforce one overall deadline per parallel batch and actively close timed-out
+  sockets, preventing per-block timeouts from accumulating across 16 requests.
+- Persist selection, latency, service-bit, failure, and cooldown evidence for
+  block downloads through the same durable peer pool used by header sync.
+
 ## 0.38.0 — 2026-07-31
 
 - Add Bitcoin Core-style two-phase header pre-sync below each public network's

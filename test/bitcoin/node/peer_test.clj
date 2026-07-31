@@ -427,6 +427,128 @@
             (:type (ex-data failure))))
      (is (= 2 (count (:failures (ex-data failure))))))))
 
+(deftest block-download-runs-in-parallel-and-requeues-a-failed-prefix
+  (let [genesis
+        (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+        blocks
+        (vec
+         (rest
+          (reductions fixture/mine-regtest-block genesis (range 1 5))))
+        hashes (mapv #(get-in % [:header :hash]) blocks)
+        raws (into {} (map #(vector (get-in % [:header :hash])
+                                    (block/serialize %))
+                           blocks))
+        requests (atom [])
+        closed (atom [])]
+    (with-redefs
+     [peer/connect!
+      (fn [{:keys [host]}]
+        {:id host :peer-version {:services peer/node-network-service}})
+      peer/close! #(swap! closed conj (:id %))
+      peer/get-block!
+      (fn [connection hash]
+        (swap! requests conj [(:id connection) hash])
+        (if (and (= "peer-a" (:id connection))
+                 (= (second hashes) hash))
+          (throw (ex-info "stalled" {:type :bitcoin.node/peer-timeout}))
+          (get raws hash)))]
+     (let [result
+           (peer/download-blocks-from-peers!
+            [{:host "peer-a"} {:host "peer-b"} {:host "peer-c"}]
+            hashes
+            {:parallel-peers 2 :per-peer-limit 2})]
+       (is (= :downloaded (:status result)))
+       (is (= 4 (:downloaded result)))
+       (is (= (mapv raws hashes) (:blocks result))
+           "network completion order must not change chain commit order")
+       (is (= :bitcoin.node/peer-timeout
+              (get-in result [:failures 0 :type])))
+       (is (= "peer-a"
+              (get-in result [:failures 0 :peer :host])))
+       (is (= 2 (count (filter #(= (second hashes) (second %))
+                              @requests)))
+           "the failed in-flight block is requeued exactly once")
+       (is (= #{"peer-a" "peer-b"} (set @closed)))
+       (is (= #{"peer-b"}
+              (set (map #(get-in % [:peer :host])
+                        (:observations result)))))))))
+
+(deftest block-download-correlates-parsed-hashes-before-acceptance
+  (let [genesis
+        (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+        block-1 (fixture/mine-regtest-block genesis 1)
+        block-2 (fixture/mine-regtest-block block-1 2)
+        requested (get-in block-1 [:header :hash])
+        attempts (atom [])]
+    (with-redefs
+     [peer/connect!
+      (fn [{:keys [host]}]
+        {:id host :peer-version {:services 1}})
+      peer/close! (constantly nil)
+      peer/get-block!
+      (fn [connection _]
+        (swap! attempts conj (:id connection))
+        (if (= "equivocating" (:id connection))
+          (block/serialize block-2)
+          (block/serialize block-1)))]
+     (let [result
+           (peer/download-blocks-from-peers!
+            [{:host "equivocating"} {:host "honest"}]
+            [requested]
+            {:parallel-peers 1})]
+       (is (= [(block/serialize block-1)] (:blocks result)))
+       (is (= ["equivocating" "honest"] @attempts))
+       (is (= :bitcoin.node/block-response-mismatch
+              (get-in result [:failures 0 :type])))
+       (is (= :wrong-block
+              (get-in result [:failures 0 :reason])))))))
+
+(deftest block-download-exhaustion-retains-every-typed-peer-failure
+  (let [hash (vec (repeat 32 1))]
+    (with-redefs
+     [peer/connect!
+      (fn [{:keys [host]}]
+        (throw (ex-info host {:type :test/offline})))]
+     (let [failure
+           (try
+             (peer/download-blocks-from-peers!
+              [{:host "peer-a"} {:host "peer-b"}]
+              [hash] {:parallel-peers 2})
+             (catch clojure.lang.ExceptionInfo error error))]
+       (is (= :bitcoin.node/block-peer-set-exhausted
+              (:type (ex-data failure))))
+       (is (= 2 (count (:failures (ex-data failure))))
+           "all assigned failures survive into operator evidence")
+       (is (= #{"peer-a" "peer-b"}
+              (set (map #(get-in % [:peer :host])
+                        (:failures (ex-data failure))))))))))
+
+(deftest block-download-deadline-bounds-an-entire-peer-batch
+  (let [hash (vec (repeat 32 1))
+        closed (atom false)
+        started (System/nanoTime)]
+    (with-redefs
+     [peer/connect!
+      (fn [_] {:id "slow" :peer-version {:services 1}})
+      peer/get-block!
+      (fn [& _] (Thread/sleep 5000))
+      peer/close!
+      (fn [_] (reset! closed true))]
+     (let [failure
+           (try
+             (peer/download-blocks-from-peers!
+              [{:host "slow"}] [hash]
+              {:batch-timeout-ms 1000})
+             (catch clojure.lang.ExceptionInfo error error))
+           elapsed-ms (/ (- (System/nanoTime) started) 1e6)]
+       (is (= :bitcoin.node/block-peer-set-exhausted
+              (:type (ex-data failure))))
+       (is (= :bitcoin.node/block-download-timeout
+              (get-in (ex-data failure) [:failures 0 :type])))
+       (is @closed "the timed-out socket is actively closed")
+       (is (< elapsed-ms 2500)
+           "per-block deadlines cannot accumulate across a 16-block batch")))))
+
 (deftest compact-filter-headers-require-byte-identical-peer-quorum
   (let [agreed
         [{:filter-hash (vec (repeat 32 1))

@@ -252,6 +252,39 @@
                         [:peers (pool/peer-id configuration)
                          :failures])))))))
 
+(deftest managed-block-download-updates-success-and-cooldown-evidence
+  (let [bad {:host "bad" :network :regtest}
+        good {:host "good" :network :regtest}
+        pool-atom (atom (pool/create [bad good]))
+        hash (vec (repeat 32 1))]
+    (with-redefs
+     [peer/download-blocks-from-peers!
+      (fn [configurations hashes options]
+        (is (= #{"bad" "good"} (set (map :host configurations))))
+        (is (= [hash] hashes))
+        (is (= {:parallel-peers 2} options))
+        {:status :downloaded
+         :downloaded 1
+         :blocks [[1 2 3]]
+         :observations
+         [{:peer {:host "good" :port 18444 :network :regtest}
+           :elapsed-ms 12.0 :services 1 :downloaded 1}]
+         :failures
+         [{:peer {:host "bad" :port 18444 :network :regtest}
+           :type :bitcoin.node/peer-timeout :elapsed-ms 500.0}]})]
+     (let [result
+           (pool/download-blocks!
+            pool-atom [hash]
+            {:now-ms 1000 :maximum-peers 2 :parallel-peers 2})]
+       (is (= [[1 2 3]] (:blocks result)))
+       (is (= 1 (get-in result [:pool :successful])))
+       (is (= 1 (get-in @pool-atom
+                        [:peers (pool/peer-id good) :successes])))
+       (is (= 1 (get-in @pool-atom
+                        [:peers (pool/peer-id bad) :failures])))
+       (is (= ["good"]
+              (mapv :host (pool/candidates @pool-atom 1001 2))))))))
+
 (deftest managed-sync-persists-selection-on-unexpected-failure
   (let [directory
         (Files/createTempDirectory

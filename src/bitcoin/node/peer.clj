@@ -3,7 +3,9 @@
 
   It performs version/verack, answers ping, and requests headers in protocol
   batches. Transaction relay, wallet, mempool, and mining commands are absent."
-  (:require [bitcoin.consensus.codec :as codec]
+  (:require [bitcoin.consensus.block :as block]
+            [bitcoin.consensus.codec :as codec]
+            [bitcoin.consensus.sync :as sync]
             [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.headers-sync :as headers-sync]
             [clojure.string :as str]
@@ -32,6 +34,8 @@
 (def maximum-service-mask 18446744073709551615N)
 (def witness-block-inventory-type 0x40000002)
 (def maximum-filter-headers 2000)
+(def maximum-block-download-peers 8)
+(def maximum-block-download-batch sync/max-inflight)
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
@@ -131,7 +135,7 @@
   [{:keys [host port network timeout-ms start-height user-agent
            required-services]
     :or {host "127.0.0.1" network :mainnet timeout-ms 10000
-         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.37.0/"
+         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.39.0/"
          required-services 0}}]
   (let [base-config (get network-configuration network)]
     (when-not base-config
@@ -550,10 +554,291 @@
      :network network}))
 
 (defn- failure-summary [configuration error elapsed-ms]
-  {:peer (peer-summary configuration)
-   :type (or (:type (ex-data error)) :bitcoin.node/peer-error)
-   :message (.getMessage ^Throwable error)
-   :elapsed-ms elapsed-ms})
+  (let [data (ex-data error)]
+    (cond->
+     {:peer (peer-summary configuration)
+      :type (or (:type data) :bitcoin.node/peer-error)
+      :message (.getMessage ^Throwable error)
+      :elapsed-ms elapsed-ms}
+      (:reason data) (assoc :reason (:reason data)))))
+
+(defn- validate-block-download!
+  [peer-configurations block-hashes parallel-peers per-peer-limit
+   batch-timeout-ms]
+  (let [peers (vec peer-configurations)
+        hashes (vec block-hashes)]
+    (when-not
+     (and (<= 1 (count peers) 32)
+          (every? #(and (map? %)
+                        (string? (:host %))
+                        (not (str/blank? (:host %))))
+                  peers)
+          (= (count peers)
+             (count (into #{} (map peer-summary) peers))))
+      (fail!
+       :bitcoin.node/block-peer-set
+       "Block download requires 1..32 unique peers with explicit hosts."
+       {:peer-count (count peers)}))
+    (when-not
+     (and (<= (count hashes) maximum-block-download-batch)
+          (= (count hashes) (count (distinct hashes)))
+          (every? #(and (sequential? %) (= 32 (count %))) hashes))
+      (fail!
+       :bitcoin.node/block-download-set
+       "Block download hashes must be unique natural-order values within the bounded window."
+       {:count (count hashes) :limit maximum-block-download-batch}))
+    (when-not
+     (and (integer? parallel-peers)
+          (<= 1 parallel-peers maximum-block-download-peers)
+          (integer? per-peer-limit)
+          (<= 1 per-peer-limit sync/max-inflight-per-peer)
+          (integer? batch-timeout-ms)
+          (<= 1000 batch-timeout-ms 120000))
+      (fail!
+       :bitcoin.node/block-download-configuration
+       "Block download parallelism is outside its bounded limits."
+       {:parallel-peers parallel-peers
+        :maximum-parallel-peers maximum-block-download-peers
+        :per-peer-limit per-peer-limit
+        :maximum-per-peer sync/max-inflight-per-peer
+        :batch-timeout-ms batch-timeout-ms}))
+    [peers hashes]))
+
+(defn- fetch-block-batch!
+  [configuration hashes connection downloaded started]
+  (let [elapsed-ms #(/ (- (System/nanoTime) started) 1e6)]
+    (try
+      (let [connected (connect! configuration)]
+        (reset! connection connected)
+        (doseq [hash hashes]
+          (swap! downloaded conj
+                 {:hash hash :raw (get-block! connected hash)}))
+        {:configuration configuration
+         :peer (peer-summary configuration)
+         :blocks @downloaded
+         :elapsed-ms (elapsed-ms)
+         :services (get-in connected [:peer-version :services])})
+      (catch Throwable error
+        {:configuration configuration
+         :peer (peer-summary configuration)
+         :blocks @downloaded
+         :elapsed-ms (elapsed-ms)
+         :failure (failure-summary configuration error (elapsed-ms))})
+      (finally
+        (when-let [connected @connection]
+          (try
+            (close! connected)
+            (catch Throwable _)))))))
+
+(defn- await-block-batches!
+  [jobs batch-timeout-ms]
+  (let [deadline
+        (+ (System/nanoTime) (* (long batch-timeout-ms) 1000000))]
+    (mapv
+     (fn [{:keys [configuration connection downloaded started task]}]
+       (let [remaining (- deadline (System/nanoTime))
+             result
+             (when (pos? remaining)
+               (deref task
+                      (max 1 (quot (+ remaining 999999) 1000000))
+                      ::timeout))]
+         (if (and result (not= ::timeout result))
+           result
+           (do
+             (when-let [connected @connection]
+               (try
+                 (close! connected)
+                 (catch Throwable _)))
+             (future-cancel task)
+             {:configuration configuration
+              :peer (peer-summary configuration)
+              :blocks @downloaded
+              :elapsed-ms (/ (- (System/nanoTime) started) 1e6)
+              :failure
+              (failure-summary
+               configuration
+               (ex-info
+                "Bitcoin peer exceeded the overall block-batch deadline."
+                {:type :bitcoin.node/block-download-timeout})
+               (/ (- (System/nanoTime) started) 1e6))}))))
+     jobs)))
+
+(defn- process-block-batch
+  [scheduler peer-id entries]
+  (loop [state scheduler
+         remaining (vec entries)
+         accepted []]
+    (if-let [{:keys [hash raw]} (first remaining)]
+        (let [scheduler-hash (protocol/natural-hash->hex hash)
+              attempt
+            (try
+              {:result
+               (sync/process-block
+                state peer-id scheduler-hash (block/parse raw))}
+              (catch Throwable error
+                {:error error}))]
+        (if-let [error (:error attempt)]
+          {:state (sync/disconnect state peer-id)
+           :accepted accepted
+           :error error}
+          (let [result (:result attempt)]
+            (if (:accepted? result)
+              (recur (:state result) (subvec remaining 1)
+                     (conj accepted [hash raw]))
+              {:state (sync/disconnect (:state result) peer-id)
+               :accepted accepted
+               :error
+               (ex-info
+                "Bitcoin peer response did not match its scheduled block."
+                {:type :bitcoin.node/block-response-mismatch
+                 :reason (:error result)
+                 :hash hash})}))))
+      {:state state :accepted accepted})))
+
+(defn download-blocks-from-peers!
+  "Download one bounded block window concurrently with deterministic failover.
+
+  The pure `bitcoin.consensus.sync` state machine owns assignment, global and
+  per-peer in-flight limits, response correlation, and requeue. Each peer has
+  one sequential connection, while up to `:parallel-peers` connections run in
+  parallel. Returned blocks retain the caller's chronological hash order so a
+  chainstate host can publish them atomically one at a time.
+
+  A failed peer's unfinished work is requeued to another peer. Successfully
+  downloaded prefixes are retained, and typed per-peer evidence is returned
+  for durable health scoring."
+  [peer-configurations block-hashes
+   {:keys [parallel-peers per-peer-limit batch-timeout-ms]
+    :or {parallel-peers 4
+         per-peer-limit sync/max-inflight-per-peer
+         batch-timeout-ms (* 1000 sync/request-timeout-seconds)}}]
+  (let [[peers hashes]
+        (validate-block-download!
+         peer-configurations block-hashes parallel-peers per-peer-limit
+         batch-timeout-ms)
+        peer-order (mapv peer-summary peers)
+        scheduler-hashes (mapv protocol/natural-hash->hex hashes)
+        natural-hash-by-scheduler
+        (zipmap scheduler-hashes hashes)
+        initial
+        (reduce sync/register-peer
+                (sync/create scheduler-hashes) peer-order)]
+    (if (empty? hashes)
+      {:status :downloaded :downloaded 0 :blocks []
+       :observations [] :failures []}
+      (loop [scheduler initial
+             downloaded {}
+             observations {}
+             failures []]
+        (if (= (count hashes) (count downloaded))
+          {:status :downloaded
+           :downloaded (count downloaded)
+           :blocks (mapv downloaded hashes)
+           :observations
+           (mapv observations (filter observations peer-order))
+           :failures failures}
+          (let [eligible
+                (->> peers
+                     (filter #(sync/eligible?
+                               scheduler (peer-summary %)))
+                     (take parallel-peers)
+                     vec)
+                [assigned jobs]
+                (reduce
+                 (fn [[state result] configuration]
+                   (let [peer-id (peer-summary configuration)
+                         [next-state requested]
+                         (sync/assign state peer-id
+                                      (System/currentTimeMillis)
+                                      per-peer-limit)]
+                     [next-state
+                      (cond-> result
+                        (seq requested)
+                        (conj
+                         [configuration
+                          (mapv natural-hash-by-scheduler requested)]))]))
+                 [scheduler []]
+                 eligible)]
+            (when (empty? jobs)
+              (fail!
+               :bitcoin.node/block-peer-set-exhausted
+               "Every bounded block-download peer was exhausted."
+               {:downloaded (count downloaded)
+                :remaining (count (:pending scheduler))
+                :observations
+                (mapv observations (filter observations peer-order))
+                :failures failures}))
+            (let [attempts
+                  (mapv
+                   (fn [[configuration requested]]
+                     (let [connection (atom nil)
+                           downloaded (atom [])
+                           started (System/nanoTime)]
+                       {:configuration configuration
+                        :connection connection
+                        :downloaded downloaded
+                        :started started
+                        :task
+                        (future
+                          (fetch-block-batch!
+                           configuration requested connection downloaded
+                           started))}))
+                   jobs)
+                  results
+                  (await-block-batches! attempts batch-timeout-ms)
+                  next
+                  (reduce
+                   (fn [{:keys [state] :as result}
+                        {:keys [configuration peer elapsed-ms services
+                                failure]
+                         :as attempt}]
+                     (let [processed
+                           (process-block-batch
+                            state peer (:blocks attempt))
+                           response-error (:error processed)
+                           terminal-error (or response-error failure)
+                           state'
+                           (if terminal-error
+                             (sync/disconnect (:state processed) peer)
+                             (:state processed))
+                           accepted (:accepted processed)
+                           failure'
+                           (when terminal-error
+                             (if response-error
+                               (failure-summary
+                                configuration response-error elapsed-ms)
+                               failure))]
+                       (cond->
+                        (assoc result :state state')
+                         (seq accepted)
+                         (update :blocks into accepted)
+
+                         terminal-error
+                         (update :failed conj failure')
+
+                         (not terminal-error)
+                         (update
+                          :evidence
+                          (fn [values]
+                            (update
+                             values peer
+                             (fn [previous]
+                               {:peer peer
+                                :elapsed-ms
+                                (+ (or (:elapsed-ms previous) 0)
+                                   elapsed-ms)
+                                :services services
+                                :downloaded
+                                (+ (or (:downloaded previous) 0)
+                                   (count accepted))})))))))
+                   {:state assigned :blocks [] :evidence observations
+                    :failed []}
+                   results)]
+              (recur
+               (:state next)
+               (into downloaded (:blocks next))
+               (:evidence next)
+               (into failures (:failed next))))))))))
 
 (defn sync-headers-from-peers!
   "Synchronize through a bounded, ordered peer set with durable failover.

@@ -25,3 +25,12 @@ peer-supplied headers must pass the two-download salted-commitment protocol
 before entering SQLite. Direct users of the lower-level `bitcoin.node.peer`
 API must supply `:presync` themselves; omitting it is appropriate only when a
 separate trusted host already enforces an equivalent anti-DoS boundary.
+
+Managed block synchronization keeps the network pipeline and chainstate
+publication as separate boundaries. Up to eight peers may download
+concurrently, but each is capped at 16 requests, the resident raw-block window
+is capped at 128, and one overall batch deadline actively closes stalled
+sockets. Parsed hashes must match their scheduler assignments, and only
+chronological full validation can publish SQLite state. Failed peers cannot
+make unfinished assignments disappear: they are requeued and the typed failure
+enters the durable cooldown history.

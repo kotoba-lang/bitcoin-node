@@ -12,6 +12,7 @@
             [bitcoin.node.disk-utxo :as disk-utxo]
             [bitcoin.node.lazy-header-map :as lazy-header-map]
             [bitcoin.node.peer :as peer]
+            [bitcoin.node.peer-pool :as peer-pool]
             [clojure.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header])
   (:import [java.nio.file Files Path]
@@ -603,6 +604,53 @@
         (is (= [(get-in block-1 [:header :hash])
                 (get-in block-2 [:header :hash])]
                @requested))))))
+
+(deftest managed-block-sync-downloads-in-parallel-but-commits-chronologically
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            blocks
+            (vec
+             (rest
+              (reductions fixture/mine-regtest-block genesis (range 1 4))))
+            hashes (mapv #(get-in % [:header :hash]) blocks)
+            raws (mapv block/serialize blocks)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            pool-atom (atom ::pool)]
+        (disk/accept-headers!
+         node (mapv #(get-in % [:header :bytes]) blocks) 2000000000)
+        (with-redefs
+         [peer-pool/download-blocks!
+          (fn [actual-pool requested options]
+            (is (= pool-atom actual-pool))
+            (is (= hashes requested))
+            (is (= {:maximum-peers 3 :parallel-peers 3} options))
+            {:status :downloaded
+             :downloaded 3
+             :blocks raws
+             :observations [{:peer {:host "a"} :downloaded 2}
+                            {:peer {:host "b"} :downloaded 1}]
+             :failures [{:peer {:host "stalled"}
+                         :type :bitcoin.node/peer-timeout}]
+             :pool {:successful 2}})]
+          (let [result
+                (disk/sync-blocks-managed!
+                 node pool-atom 2000000000
+                 {:max-blocks 3
+                  :maximum-peers 3
+                  :parallel-peers 3})]
+            (is (= :synced (:status result)))
+            (is (= 3 (:downloaded result)))
+            (is (= 1 (:windows result)))
+            (is (false? (:more? result)))
+            (is (= 3 (get-in result [:consensus :height])))
+            (is (= 2 (count (:observations result))))
+            (is (= 1 (count (:failures result))))
+            (is (disk/ready? node))))))))
 
 (deftest disk-consensus-reorganizes-with-durable-undo
   (with-store

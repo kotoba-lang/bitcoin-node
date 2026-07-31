@@ -112,9 +112,15 @@ restart and can find a common ancestor after a reorganization. A bounded peer
 set fails over from the latest durable locator, records typed failure evidence,
 and can compare independently reported tips; only local validation and exact
 most-work fork choice select state. It deliberately has no transaction relay,
-mempool, wallet, signing, or mining commands. Retained blocks can be requested
-individually with witness data; the response header must match the requested
-hash before the raw block is returned to the full consensus validator.
+mempool, wallet, signing, or mining commands. Best-chain blocks are scheduled
+across up to eight diverse peers, with at most 16 in-flight requests per peer
+and 128 raw blocks resident per window. Every response is correlated after
+parsing, unfinished work is requeued after a timeout or disconnect, and
+downloaded blocks are released in chronological order to the full consensus
+validator. One overall batch deadline actively closes stalled sockets rather
+than allowing 16 individual request timeouts to accumulate. SQLite publication
+remains one fully validated block at a time, so parallel network completion
+cannot expose a child before its parent.
 
 Initial public-network header synchronization now uses a Bitcoin Core-style
 two-phase anti-DoS boundary until the network's pinned minimum chainwork is

@@ -219,7 +219,8 @@
                   :bitcoin.node/peer-required-services
                   :bitcoin.node/peer-checksum
                   :bitcoin.node/peer-oversized-message
-                  :bitcoin.node/peer-unrequested-block}
+                  :bitcoin.node/peer-unrequested-block
+                  :bitcoin.node/block-response-mismatch}
                 error-type)
                cooldown
                (if severe?
@@ -533,4 +534,40 @@
       (finally
         ;; Selection is health history too. Persist it even when an unexpected
         ;; callback exception interrupts the managed synchronization.
+        (when pool-path (save! pool-path @pool-atom))))))
+
+(defn download-blocks!
+  "Download one bounded block window through diverse, health-scored peers.
+
+  Selection history is persisted before network I/O. Successful peers update
+  latency/service evidence; failed peers enter the same typed exponential
+  cooldown used by header synchronization."
+  [pool-atom block-hashes
+   {:keys [now-ms maximum-peers pool-path]
+    :or {now-ms (System/currentTimeMillis) maximum-peers 8}
+    :as options}]
+  (let [selected (candidates @pool-atom now-ms maximum-peers)]
+    (when (empty? selected)
+      (fail! :bitcoin.node/peer-pool-cooldown
+             "No peer is currently outside cooldown."
+             (status @pool-atom now-ms)))
+    (swap! pool-atom mark-selected selected now-ms)
+    (try
+      (let [result
+            (peer/download-blocks-from-peers!
+             selected block-hashes
+             (dissoc options :now-ms :maximum-peers :pool-path))]
+        (doseq [{:keys [peer elapsed-ms services]} (:observations result)]
+          (swap! pool-atom record-success
+                 peer now-ms elapsed-ms services))
+        (doseq [{:keys [peer type elapsed-ms]} (:failures result)]
+          (swap! pool-atom record-failure
+                 peer now-ms type elapsed-ms))
+        (assoc result :pool (status @pool-atom now-ms)))
+      (catch clojure.lang.ExceptionInfo error
+        (doseq [{:keys [peer type elapsed-ms]} (:failures (ex-data error))]
+          (swap! pool-atom record-failure
+                 peer now-ms type elapsed-ms))
+        (throw error))
+      (finally
         (when pool-path (save! pool-path @pool-atom))))))

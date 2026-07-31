@@ -920,6 +920,63 @@
         :more? more?
         :consensus (consensus-status node)}))))
 
+(defn sync-blocks-managed!
+  "Download and commit best-chain blocks through a managed multi-peer pool.
+
+  At most `bitcoin.consensus.sync/max-inflight` raw blocks are resident between
+  validation commits. Network retrieval is parallel and failover-aware, while
+  publication remains chronological through `accept-block!`; a later block can
+  never become durable before its parent. A larger `:max-blocks` cycle is split
+  into bounded windows."
+  ([node pool-atom now]
+   (sync-blocks-managed! node pool-atom now {}))
+  ([node pool-atom now
+    {:keys [max-blocks] :or {max-blocks 128} :as options}]
+   (when-not (and (integer? max-blocks) (<= 1 max-blocks 1024))
+     (fail! :bitcoin.node/block-sync-limit
+            "Block synchronization limit must be between 1 and 1,024."
+            {:limit max-blocks}))
+   (loop [remaining max-blocks
+          downloaded 0
+          windows 0
+          observations []
+          failures []]
+     (let [limit (min remaining peer/maximum-block-download-batch)
+           hashes (pending-best-chain-blocks node limit)]
+       (if (empty? hashes)
+         {:status :synced
+          :downloaded downloaded
+          :more? false
+          :windows windows
+          :observations observations
+          :failures failures
+          :consensus (consensus-status node)}
+         (let [result
+               (peer-pool/download-blocks!
+                pool-atom hashes
+                (dissoc options :max-blocks))
+               raws (:blocks result)]
+           (doseq [raw raws]
+             (accept-block! node raw now))
+           (let [count' (count raws)
+                 downloaded' (+ downloaded count')
+                 remaining' (- remaining count')
+                 observations' (into observations (:observations result))
+                 failures' (into failures (:failures result))
+                 more?
+                 (boolean (seq (pending-best-chain-blocks node 1)))]
+             (if (or (zero? remaining') (not more?))
+               {:status (if more? :batch-limit :synced)
+                :downloaded downloaded'
+                :more? more?
+                :windows (inc windows)
+                :observations observations'
+                :failures failures'
+                :pool (:pool result)
+                :consensus (consensus-status node)}
+               (recur remaining' downloaded' (inc windows)
+                      observations' failures')))))))))
+
 (defn- transition-paths [before after]
   (loop [old-hash (:active-tip before)
          new-hash (:active-tip after)
