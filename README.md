@@ -61,8 +61,13 @@ Its output matches all 10 SHA-256-pinned Bitcoin Core v31.1
 the stop block, requires the exact requested header count, extends an explicit
 local anchor, strictly decodes the GCS payload, and authenticates each filter
 against its expected header before returning it. Compact filters are
-non-consensus hints: callers must retain trusted local anchors and compare
-independent peers before treating a negative match as a scan result.
+non-consensus hints. `get-basic-filter-headers-from-peers!` therefore requires
+2..32 unique peers and returns only after a configurable quorum has supplied a
+byte-identical chain for the same retained anchor, exact height range, and stop
+block. Successful but conflicting replies never count toward quorum.
+`get-basic-filter-from-peers!` then fails over across filter peers while
+authenticating the payload into the agreed expected header, so callers can
+safely use a negative match without silently trusting one peer.
 
 `bitcoin.node.disk-consensus` is the mainnet-scale embedded host. It validates
 headers and blocks, selects the most-work chain, and atomically commits the

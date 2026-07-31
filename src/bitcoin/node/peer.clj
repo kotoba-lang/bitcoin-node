@@ -130,7 +130,7 @@
   [{:keys [host port network timeout-ms start-height user-agent
            required-services]
     :or {host "127.0.0.1" network :mainnet timeout-ms 10000
-         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.36.0/"
+         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.37.0/"
          required-services 0}}]
   (let [base-config (get network-configuration network)]
     (when-not base-config
@@ -586,4 +586,174 @@
                 :successful-peers (count observations)
                 :required-successes required-successes
                 :observations observations
+                :failures failures})))))
+
+(defn- compact-filter-peer-configuration [configuration]
+  (update
+   configuration :required-services
+   (fn [value]
+     (.or (biginteger (or value 0))
+          (biginteger node-compact-filters-service)))))
+
+(defn- compact-header-observation [configuration headers elapsed-ms]
+  {:peer (peer-summary configuration)
+   :count (count headers)
+   :terminal-header
+   (when-let [header (:header (last headers))]
+     (protocol/natural-hash->hex header))
+   :elapsed-ms elapsed-ms})
+
+(defn- validate-compact-filter-peer-set!
+  [peer-configurations required-successes attempts-per-peer]
+  (let [peers (vec peer-configurations)]
+    (when-not
+     (and (<= 2 (count peers) 32)
+          (every? #(and (map? %)
+                        (string? (:host %))
+                        (not (str/blank? (:host %))))
+                  peers)
+          (= (count peers)
+             (count (into #{} (map peer-summary) peers))))
+      (fail! :bitcoin.node/compact-filter-peer-set
+             "Compact-filter quorum requires 2..32 unique explicit peers."
+             {:count (count peers)}))
+    (when-not (and (integer? required-successes)
+                   (<= 2 required-successes (count peers))
+                   (integer? attempts-per-peer)
+                   (<= 1 attempts-per-peer 8))
+      (fail! :bitcoin.node/compact-filter-peer-configuration
+             "Compact-filter quorum and retry bounds are invalid."
+             {:required-successes required-successes
+              :attempts-per-peer attempts-per-peer
+              :peer-count (count peers)}))
+    peers))
+
+(defn get-basic-filter-headers-from-peers!
+  "Require exact BIP157 header-chain agreement from independent peers.
+
+  Every peer receives the same height range, stop hash, and retained previous
+  header. A result is returned only when `:required-successes` peers return the
+  byte-identical chain. Merely collecting that many successful but conflicting
+  responses fails closed."
+  [peer-configurations start-height stop-height stop-hash previous-header
+   {:keys [required-successes attempts-per-peer]
+    :or {required-successes 2 attempts-per-peer 1}}]
+  (let [peers
+        (validate-compact-filter-peer-set!
+         peer-configurations required-successes attempts-per-peer)
+        attempts
+        (vec (mapcat identity (repeat attempts-per-peer peers)))]
+    (loop [remaining attempts observations [] failures []]
+      (if-let [configuration (first remaining)]
+        (if (some #(= (peer-summary configuration) (:peer %)) observations)
+          (recur (subvec remaining 1) observations failures)
+          (let [started (System/nanoTime)
+                elapsed-ms #(/ (- (System/nanoTime) started) 1e6)
+                configured (compact-filter-peer-configuration configuration)
+                attempt
+                (try
+                  (let [connection (connect! configured)]
+                    (try
+                      {:headers
+                       (get-basic-filter-headers!
+                        connection start-height stop-height stop-hash
+                        previous-header)}
+                      (finally
+                        (close! connection))))
+                  (catch Exception error
+                    {:failure
+                     (failure-summary
+                      configuration error (elapsed-ms))}))]
+            (if-let [headers (:headers attempt)]
+              (let [observation
+                    {:peer (peer-summary configuration)
+                     :headers headers
+                     :elapsed-ms (elapsed-ms)}
+                    next-observations (conj observations observation)
+                    matching
+                    (filterv #(= headers (:headers %)) next-observations)]
+                (if (>= (count matching) required-successes)
+                  {:status :agreed
+                   :required-successes required-successes
+                   :agreement-peers (count matching)
+                   :successful-peers (count next-observations)
+                   :attempted (+ (count next-observations)
+                                 (count failures))
+                   :disagreement?
+                   (> (count (distinct (map :headers next-observations))) 1)
+                   :headers headers
+                   :observations
+                   (mapv
+                    #(compact-header-observation
+                      (:peer %) (:headers %) (:elapsed-ms %))
+                    next-observations)
+                   :failures failures}
+                  (recur (subvec remaining 1)
+                         next-observations failures)))
+              (recur (subvec remaining 1) observations
+                     (conj failures (:failure attempt))))))
+        (fail!
+         :bitcoin.node/compact-filter-quorum
+         "Independent peers did not reach compact-filter header agreement."
+         {:required-successes required-successes
+          :successful-peers (count observations)
+          :attempted (+ (count observations) (count failures))
+          :distinct-responses
+          (count (distinct (map :headers observations)))
+          :observations
+          (mapv
+           #(compact-header-observation
+             (:peer %) (:headers %) (:elapsed-ms %))
+           observations)
+          :failures failures})))))
+
+(defn get-basic-filter-from-peers!
+  "Fetch one filter with bounded failover against a quorum-authenticated header.
+
+  Since `get-basic-filter!` verifies the filter hash into `expected-header`, a
+  malicious or stale peer cannot create a false-negative scan without breaking
+  the header quorum or double-SHA256."
+  [peer-configurations height block-hash previous-header expected-header]
+  (let [peers (vec peer-configurations)]
+    (when-not
+     (and (<= 1 (count peers) 32)
+          (every? #(and (map? %)
+                        (string? (:host %))
+                        (not (str/blank? (:host %))))
+                  peers)
+          (= (count peers)
+             (count (into #{} (map peer-summary) peers))))
+      (fail! :bitcoin.node/compact-filter-peer-set
+             "Compact-filter fetch requires 1..32 unique explicit peers."
+             {:count (count peers)}))
+    (loop [remaining peers failures []]
+      (if-let [configuration (first remaining)]
+        (let [started (System/nanoTime)
+              elapsed-ms #(/ (- (System/nanoTime) started) 1e6)
+              configured (compact-filter-peer-configuration configuration)
+              attempt
+              (try
+                (let [connection (connect! configured)]
+                  (try
+                    {:encoded
+                     (get-basic-filter!
+                      connection height block-hash
+                      previous-header expected-header)}
+                    (finally
+                      (close! connection))))
+                (catch Exception error
+                  {:failure
+                   (failure-summary
+                    configuration error (elapsed-ms))}))]
+          (if-let [encoded (:encoded attempt)]
+            {:status :authenticated
+             :peer (peer-summary configuration)
+             :encoded encoded
+             :elapsed-ms (elapsed-ms)
+             :failures failures}
+            (recur (subvec remaining 1)
+                   (conj failures (:failure attempt)))))
+        (fail! :bitcoin.node/compact-filter-fetch-failed
+               "Every peer failed authenticated compact-filter retrieval."
+               {:height height :block-hash block-hash
                 :failures failures})))))

@@ -419,3 +419,92 @@
      (is (= :bitcoin.node/peer-set-exhausted
             (:type (ex-data failure))))
      (is (= 2 (count (:failures (ex-data failure))))))))
+
+(deftest compact-filter-headers-require-byte-identical-peer-quorum
+  (let [agreed
+        [{:filter-hash (vec (repeat 32 1))
+          :header (vec (repeat 32 2))}
+         {:filter-hash (vec (repeat 32 3))
+          :header (vec (repeat 32 4))}]
+        conflicting
+        [{:filter-hash (vec (repeat 32 5))
+          :header (vec (repeat 32 6))}
+         {:filter-hash (vec (repeat 32 7))
+          :header (vec (repeat 32 8))}]
+        configured (atom [])
+        closed (atom [])]
+    (with-redefs
+     [peer/connect!
+      (fn [configuration]
+        (swap! configured conj configuration)
+        {:id (:host configuration)})
+      peer/close! #(swap! closed conj (:id %))
+      peer/get-basic-filter-headers!
+      (fn [connection start stop stop-hash previous]
+        (is (= [100 101 (vec (repeat 32 9)) (vec (repeat 32 0))]
+               [start stop stop-hash previous]))
+        (if (= "peer-b" (:id connection)) conflicting agreed))]
+     (let [result
+           (peer/get-basic-filter-headers-from-peers!
+            [{:host "peer-a" :required-services peer/node-network-service}
+             {:host "peer-b"}
+             {:host "peer-c"}]
+            100 101 (vec (repeat 32 9)) (vec (repeat 32 0))
+            {:required-successes 2})]
+       (is (= :agreed (:status result)))
+       (is (= agreed (:headers result)))
+       (is (= 2 (:agreement-peers result)))
+       (is (= 3 (:successful-peers result)))
+       (is (true? (:disagreement? result)))
+       (is (= #{"peer-a" "peer-b" "peer-c"} (set @closed)))
+       (is (every?
+            #(.testBit (biginteger (:required-services %)) 6)
+            @configured))
+       (is (every? #(nil? (:headers %)) (:observations result)))))))
+
+(deftest conflicting-compact-filter-peers-fail-closed
+  (with-redefs
+   [peer/connect! (fn [configuration] {:id (:host configuration)})
+    peer/close! (constantly nil)
+    peer/get-basic-filter-headers!
+    (fn [connection & _]
+      [{:filter-hash (vec (repeat 32 1))
+        :header
+        (vec
+         (repeat 32 (if (= "peer-a" (:id connection)) 2 3)))}])]
+   (let [failure
+         (try
+           (peer/get-basic-filter-headers-from-peers!
+            [{:host "peer-a"} {:host "peer-b"}]
+            10 10 (vec (repeat 32 4)) (vec (repeat 32 0)) {})
+           (catch clojure.lang.ExceptionInfo error error))]
+     (is (= :bitcoin.node/compact-filter-quorum
+            (:type (ex-data failure))))
+     (is (= 2 (:successful-peers (ex-data failure))))
+     (is (= 2 (:distinct-responses (ex-data failure))))
+     (is (= 2 (count (:observations (ex-data failure))))))))
+
+(deftest authenticated-compact-filter-fetch-fails-over
+  (let [encoded [0]
+        closed (atom [])]
+    (with-redefs
+     [peer/connect! (fn [configuration] {:id (:host configuration)})
+      peer/close! #(swap! closed conj (:id %))
+      peer/get-basic-filter!
+      (fn [connection & _]
+        (if (= "stale" (:id connection))
+          (throw
+           (ex-info "header mismatch"
+                    {:type :bitcoin.node/peer-compact-filter-header}))
+          encoded))]
+     (let [result
+           (peer/get-basic-filter-from-peers!
+            [{:host "stale"} {:host "healthy"}]
+            42 (vec (repeat 32 1))
+            (vec (repeat 32 2)) (vec (repeat 32 3)))]
+       (is (= :authenticated (:status result)))
+       (is (= encoded (:encoded result)))
+       (is (= "healthy" (get-in result [:peer :host])))
+       (is (= :bitcoin.node/peer-compact-filter-header
+              (get-in result [:failures 0 :type])))
+       (is (= ["stale" "healthy"] @closed))))))

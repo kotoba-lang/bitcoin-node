@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.0 — 2026-07-31
+
+- Require byte-identical BIP157 filter-header agreement from a bounded set of
+  2..32 unique peers sharing the same retained anchor, exact height range, and
+  stop block.
+- Count only matching responses toward the configurable quorum; preserve
+  bounded peer/failure evidence and reject successful but conflicting chains.
+- Add authenticated compact-filter fetch failover after quorum, accepting a
+  payload only when strict GCS decoding and its expected filter header match.
+- Automatically require `NODE_COMPACT_FILTERS` without weakening any
+  operator-supplied service-bit requirements.
+
 ## 0.36.0 — 2026-07-31
 
 - Implement BIP158 basic compact-filter construction, strict decoding,
