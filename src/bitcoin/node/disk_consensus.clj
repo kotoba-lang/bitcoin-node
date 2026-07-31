@@ -1006,27 +1006,66 @@
             error))
           (throw error))))))
 
+(defn- validation-failure-summary [error]
+  (let [data (ex-data error)]
+    {:peer (:source-peer data)
+     :type (:peer-feedback data)
+     :validation-type (:type data)
+     :block-validation-result (:block-validation-result data)
+     :block-hash (or (:invalid-block-hash data) (:block-hash data))
+     :message (.getMessage error)}))
+
+(defn- commit-managed-window!
+  [node pool-atom raws sources now options]
+  (loop [entries
+         (mapv vector raws (concat sources (repeat nil)))
+         committed 0]
+    (if-let [[raw source] (first entries)]
+      (let [attempt
+            (try
+              (accept-managed-block!
+               node pool-atom source raw now options)
+              {:accepted? true}
+              (catch clojure.lang.ExceptionInfo error
+                {:error error}))]
+        (if-let [error (:error attempt)]
+          (if (:peer-feedback (ex-data error))
+            {:committed committed
+             :rejection (validation-failure-summary error)}
+            (throw error))
+          (recur (subvec entries 1) (inc committed))))
+      {:committed committed})))
+
 (defn sync-blocks-managed!
   "Download and commit best-chain blocks through a managed multi-peer pool.
 
   At most `bitcoin.consensus.sync/max-inflight` raw blocks are resident between
   validation commits. Network retrieval is parallel and failover-aware, while
   publication remains chronological through `accept-block!`; a later block can
-  never become durable before its parent. A larger `:max-blocks` cycle is split
-  into bounded windows."
+  never become durable before its parent. Invalid or mutated provider bodies
+  retain their committed prefix and retry another eligible peer in this same
+  cycle. A larger `:max-blocks` cycle is split into bounded windows."
   ([node pool-atom now]
    (sync-blocks-managed! node pool-atom now {}))
   ([node pool-atom now
-    {:keys [max-blocks] :or {max-blocks 128} :as options}]
+    {:keys [max-blocks max-validation-retries]
+     :or {max-blocks 128 max-validation-retries 32}
+     :as options}]
    (when-not (and (integer? max-blocks) (<= 1 max-blocks 1024))
      (fail! :bitcoin.node/block-sync-limit
             "Block synchronization limit must be between 1 and 1,024."
             {:limit max-blocks}))
+   (when-not (and (integer? max-validation-retries)
+                  (<= 1 max-validation-retries 32))
+     (fail! :bitcoin.node/block-validation-retry-configuration
+            "Block validation retries must be between 1 and 32."
+            {:max-validation-retries max-validation-retries}))
    (loop [remaining max-blocks
           downloaded 0
           windows 0
           observations []
-          failures []]
+          failures []
+          validation-failures []]
      (let [limit (min remaining peer/maximum-block-download-batch)
            hashes (pending-best-chain-blocks node limit)]
        (if (empty? hashes)
@@ -1036,35 +1075,58 @@
           :windows windows
           :observations observations
           :failures failures
+          :validation-failures validation-failures
           :consensus (consensus-status node)}
          (let [result
-               (peer-pool/download-blocks!
-                pool-atom hashes
-                (dissoc options :max-blocks))
+               (try
+                 (peer-pool/download-blocks!
+                  pool-atom hashes
+                  (dissoc options :max-blocks :max-validation-retries))
+                 (catch clojure.lang.ExceptionInfo error
+                   (if (seq validation-failures)
+                     (throw
+                      (ex-info
+                       (.getMessage error)
+                       (assoc (ex-data error)
+                              :validation-failures validation-failures)
+                       error))
+                     (throw error))))
                raws (:blocks result)
-               sources (:block-sources result)]
-           (doseq [[raw source]
-                   (map vector raws (concat sources (repeat nil)))]
-             (accept-managed-block!
-              node pool-atom source raw now options))
-           (let [count' (count raws)
-                 downloaded' (+ downloaded count')
-                 remaining' (- remaining count')
-                 observations' (into observations (:observations result))
-                 failures' (into failures (:failures result))
-                 more?
-                 (boolean (seq (pending-best-chain-blocks node 1)))]
-             (if (or (zero? remaining') (not more?))
-               {:status (if more? :batch-limit :synced)
-                :downloaded downloaded'
-                :more? more?
-                :windows (inc windows)
-                :observations observations'
-                :failures failures'
-                :pool (:pool result)
-                :consensus (consensus-status node)}
-               (recur remaining' downloaded' (inc windows)
-                      observations' failures')))))))))
+               sources (:block-sources result)
+               committed-window
+               (commit-managed-window!
+                node pool-atom raws sources now options)
+               rejection (:rejection committed-window)
+               count' (:committed committed-window)
+               downloaded' (+ downloaded count')
+               remaining' (- remaining count')
+               observations' (into observations (:observations result))
+               failures' (into failures (:failures result))
+               validation-failures'
+               (cond-> validation-failures
+                 rejection (conj rejection))
+               more?
+               (boolean (seq (pending-best-chain-blocks node 1)))]
+           (when (> (count validation-failures')
+                    max-validation-retries)
+             (fail! :bitcoin.node/block-validation-retry-limit
+                    "Block validation retry limit was exhausted."
+                    {:max-validation-retries max-validation-retries
+                     :validation-failures validation-failures'}))
+           (if (and (not rejection)
+                    (or (zero? remaining') (not more?)))
+             {:status (if more? :batch-limit :synced)
+              :downloaded downloaded'
+              :more? more?
+              :windows (inc windows)
+              :observations observations'
+              :failures failures'
+              :validation-failures validation-failures'
+              :pool (:pool result)
+              :consensus (consensus-status node)}
+             (recur remaining' downloaded' (inc windows)
+                    observations' failures'
+                    validation-failures'))))))))
 
 (defn- transition-paths [before after]
   (loop [old-hash (:active-tip before)

@@ -126,7 +126,11 @@ quarantine, and UTXO validation remain owned by the serial SQLite consensus
 boundary. One overall batch deadline actively closes stalled sockets rather
 than allowing 16 individual request timeouts to accumulate. SQLite publication
 remains one fully validated block at a time, so parallel network completion
-cannot expose a child before its parent.
+cannot expose a child before its parent. A rejected provider body preserves
+that committed prefix and immediately recomputes pending work: mutation retries
+the same header from another eligible peer, while definitive invalidation moves
+to the best viable branch. This retry path is bounded and never attributes
+missing local verification state to a peer.
 
 Initial public-network header synchronization now uses a Bitcoin Core-style
 two-phase anti-DoS boundary until the network's pinned minimum chainwork is

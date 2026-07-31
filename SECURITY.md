@@ -34,4 +34,6 @@ sockets. Header hashes must match their scheduler assignments; complete body
 parsing and chronological validation happen only at the SQLite consensus
 boundary. Failed peers cannot
 make unfinished assignments disappear: they are requeued and the typed failure
-enters the durable cooldown history.
+enters the durable cooldown history. Invalid and mutated provider bodies retry
+inside the same bounded cycle after preserving its committed prefix; local
+verifier or ancestry failures stop without peer attribution.

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.43.0 — 2026-07-31
+
+- Retry invalid or mutated provider bodies from another eligible peer inside
+  the same managed synchronization cycle instead of waiting for the next
+  supervisor interval.
+- Preserve already committed chronological prefixes across retries, recompute
+  pending work after invalid-branch recovery, and retain bounded validation
+  failure evidence in the cycle result.
+- Bound validation rejection retries to 1..32 while stopping immediately for
+  unattributed local verifier, ancestry, or host failures.
+
 ## 0.42.0 — 2026-07-31
 
 - Restrict the parallel P2P stage to bounded raw transport plus requested

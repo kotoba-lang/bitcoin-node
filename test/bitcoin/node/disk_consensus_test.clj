@@ -705,62 +705,6 @@
             (is (= 1 (count (:failures result))))
             (is (disk/ready? node))))))))
 
-(deftest managed-block-sync-attributes-consensus-rejection-to-body-source
-  (with-store
-    (fn [path]
-      (let [genesis
-            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
-            value (fixture/mine-regtest-block genesis 1)
-            hash (get-in value [:header :hash])
-            raw (block/serialize value)
-            source {:host "invalid-body" :network :regtest}
-            node
-            (disk/open {:path path :network :regtest
-                        :genesis-bytes
-                        (fixture/hex->bytes fixture/regtest-genesis)})
-            pool-atom (atom ::pool)
-            feedback (atom nil)]
-        (disk/accept-headers!
-         node [(get-in value [:header :bytes])] 2000000000)
-        (with-redefs
-         [peer-pool/download-blocks!
-          (fn [_ requested _]
-            (is (= [hash] requested))
-            {:status :downloaded
-             :downloaded 1
-             :blocks [raw]
-             :block-sources [source]
-             :observations [] :failures []})
-          disk/accept-block!
-          (fn [& _]
-            (throw
-             (ex-info
-              "definitive invalid block"
-              {:type :bitcoin.consensus/bad-coinbase-amount
-               :invalid-block-hash "invalid"
-               :block-validation-result :invalid
-               :consensus-invalid? true})))
-          peer-pool/report-block-validation-failure!
-          (fn [actual-pool peer now error-type options]
-            (reset! feedback
-                    [actual-pool peer now error-type options]))]
-          (let [error
-                (try
-                  (disk/sync-blocks-managed!
-                   node pool-atom 2000000000
-                   {:max-blocks 1 :now-ms 1234
-                    :pool-path "peer-pool.bin"})
-                  (catch clojure.lang.ExceptionInfo value value))]
-            (is (= :bitcoin.consensus/bad-coinbase-amount
-                   (:type (ex-data error))))
-            (is (= source (:source-peer (ex-data error))))
-            (is (= :bitcoin.node/peer-invalid-block
-                   (:peer-feedback (ex-data error))))
-            (is (= [pool-atom source 1234
-                    :bitcoin.node/peer-invalid-block
-                    {:pool-path "peer-pool.bin"}]
-                   @feedback))))))))
-
 (deftest managed-sync-retries-a-merkle-mutated-copy-without-poisoning-header
   (with-store
     (fn [path]
@@ -770,34 +714,123 @@
             raw (block/serialize value)
             bad-body (update raw (dec (count raw)) bit-xor 1)
             source {:host "malleated-body" :network :regtest}
+            honest {:host "honest-body" :network :regtest}
             node
             (disk/open {:path path :network :regtest
                         :genesis-bytes
                         (fixture/hex->bytes fixture/regtest-genesis)})
-            feedback (atom nil)]
+            feedback (atom nil)
+            attempts (atom 0)]
         (disk/accept-headers!
          node [(get-in value [:header :bytes])] 2000000000)
         (with-redefs
          [peer-pool/download-blocks!
           (fn [& _]
-            {:blocks [bad-body] :block-sources [source]
-             :observations [] :failures []})
+            (if (= 1 (swap! attempts inc))
+              {:blocks [bad-body] :block-sources [source]
+               :observations [] :failures [] :pool {}}
+              {:blocks [raw] :block-sources [honest]
+               :observations [] :failures [] :pool {}}))
           peer-pool/report-block-validation-failure!
           (fn [_ peer _ error-type _]
             (reset! feedback [peer error-type]))]
+          (let [result
+                (disk/sync-blocks-managed!
+                 node (atom ::pool) 2000000000 {:max-blocks 1})
+                status (disk/consensus-status node)]
+            (is (= [source :bitcoin.node/peer-mutated-block] @feedback))
+            (is (= 2 @attempts))
+            (is (= :synced (:status result)))
+            (is (= 1 (:downloaded result)))
+            (is (= 2 (:windows result)))
+            (is (= :bitcoin.consensus/bad-merkle-root
+                   (get-in result
+                           [:validation-failures 0 :validation-type])))
+            (is (= :mutated
+                   (get-in result
+                           [:validation-failures 0
+                            :block-validation-result])))
+            (is (= 1 (:height status)))
+            (is (= 1 (:best-header-height status)))
+            (is (zero? (:invalid-blocks status)))))))))
+
+(deftest managed-sync-does-not-blame-or-retry-a-local-validation-failure
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            value (fixture/mine-regtest-block genesis 1)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            attempts (atom 0)
+            feedback (atom false)]
+        (disk/accept-headers!
+         node [(get-in value [:header :bytes])] 2000000000)
+        (with-redefs
+         [peer-pool/download-blocks!
+          (fn [& _]
+            (swap! attempts inc)
+            {:blocks [(block/serialize value)]
+             :block-sources [{:host "innocent" :network :regtest}]
+             :observations [] :failures []})
+          disk/accept-block!
+          (fn [& _]
+            (throw
+             (ex-info "local verifier unavailable"
+                      {:type :bitcoin.consensus/missing-script-verifier})))
+          peer-pool/report-block-validation-failure!
+          (fn [& _] (reset! feedback true))]
           (let [error
                 (try
                   (disk/sync-blocks-managed!
                    node (atom ::pool) 2000000000 {:max-blocks 1})
-                  (catch clojure.lang.ExceptionInfo value value))
-                status (disk/consensus-status node)]
-            (is (= :bitcoin.consensus/bad-merkle-root
+                  (catch clojure.lang.ExceptionInfo value value))]
+            (is (= :bitcoin.consensus/missing-script-verifier
                    (:type (ex-data error))))
-            (is (chainstate/mutated-block-error? error))
-            (is (= [source :bitcoin.node/peer-mutated-block] @feedback))
-            (is (= 0 (:height status)))
-            (is (= 1 (:best-header-height status)))
-            (is (zero? (:invalid-blocks status)))))))))
+            (is (= 1 @attempts))
+            (is (false? @feedback))))))))
+
+(deftest managed-sync-bounds-repeated-validation-rejections
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            value (fixture/mine-regtest-block genesis 1)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            attempts (atom 0)]
+        (disk/accept-headers!
+         node [(get-in value [:header :bytes])] 2000000000)
+        (with-redefs
+         [peer-pool/download-blocks!
+          (fn [& _]
+            (swap! attempts inc)
+            {:blocks [(block/serialize value)]
+             :block-sources [{:host "repeat-mutator" :network :regtest}]
+             :observations [] :failures []})
+          disk/accept-block!
+          (fn [& _]
+            (throw
+             (ex-info "mutated body"
+                      {:type :bitcoin.consensus/bad-merkle-root
+                       :block-hash "block"
+                       :block-validation-result :mutated
+                       :retryable? true})))
+          peer-pool/report-block-validation-failure! (fn [& _] nil)]
+          (let [error
+                (try
+                  (disk/sync-blocks-managed!
+                   node (atom ::pool) 2000000000
+                   {:max-blocks 1 :max-validation-retries 1})
+                  (catch clojure.lang.ExceptionInfo value value))]
+            (is (= :bitcoin.node/block-validation-retry-limit
+                   (:type (ex-data error))))
+            (is (= 2 @attempts))
+            (is (= 2 (count (:validation-failures (ex-data error)))))))))))
 
 (deftest context-free-invalid-body-quarantines-its-indexed-header
   (with-store
@@ -828,15 +861,19 @@
           peer-pool/report-block-validation-failure!
           (fn [_ peer _ error-type _]
             (reset! feedback [peer error-type]))]
-          (let [error
-                (try
-                  (disk/sync-blocks-managed!
-                   node (atom ::pool) 2000000000 {:max-blocks 1})
-                  (catch clojure.lang.ExceptionInfo value value))
+          (let [result
+                (disk/sync-blocks-managed!
+                 node (atom ::pool) 2000000000 {:max-blocks 1})
                 status (disk/consensus-status node)]
+            (is (= :synced (:status result)))
+            (is (zero? (:downloaded result)))
             (is (= :bitcoin.consensus/multiple-coinbase
-                   (:type (ex-data error))))
-            (is (chainstate/invalid-block-error? error))
+                   (get-in result
+                           [:validation-failures 0 :validation-type])))
+            (is (= :invalid
+                   (get-in result
+                           [:validation-failures 0
+                            :block-validation-result])))
             (is (= [source :bitcoin.node/peer-invalid-block] @feedback))
             (is (= 0 (:height status)))
             (is (= 0 (:best-header-height status)))
