@@ -328,6 +328,23 @@ CONSENSUS_HISTORY_END=850000 \
 ./scripts/core_snapshot_history_differential.sh
 ```
 
+For an archival Core, the disk-backed genesis-to-target verifier resumes after
+every committed block, rejects a stale/reorganized resume tip, freezes Core's
+`hash_serialized_3` before a long run, reopens at bounded intervals, performs a
+full SQLite integrity audit, and atomically writes machine-readable evidence:
+
+```bash
+CONSENSUS_CORE_DATADIR="/absolute/core" \
+CONSENSUS_DISK_CHAINSTATE="/absolute/kernel-mainnet.sqlite" \
+CONSENSUS_HISTORY_END=960326 \
+CONSENSUS_EVIDENCE_PATH="/absolute/full-history-evidence.json" \
+./scripts/core_full_history_differential.sh
+```
+
+If the target is not Core's current tip, provide its previously captured
+`CONSENSUS_EXPECTED_UTXO_HASH`. A pruned Core is accepted only when the durable
+kernel resume height is at or above its retained block range.
+
 The harness independently validates every header through the requested end,
 authenticates the snapshot against the pinned Core v31.1 AssumeUTXO anchor,
 compares each retained raw block's hash/size/weight with Core, applies it to

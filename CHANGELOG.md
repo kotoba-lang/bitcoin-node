@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.20.0 for Core-aligned stripped transaction,
+  item-count, and large output-script decoding boundaries.
+- Add a disk-backed, resumable genesis-to-target Bitcoin Core differential
+  verifier with canonical resume-tip checks and pruned-range preflight.
+- Freeze and compare Core/kernel `hash_serialized_3`, run full SQLite integrity,
+  detect target reorganization, and atomically publish JSON evidence.
+
 ## 0.21.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.19.0 so sequential and atomic batch header

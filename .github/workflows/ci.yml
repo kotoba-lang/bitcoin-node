@@ -34,3 +34,8 @@ jobs:
       - run: clojure -M:test
       - run: clojure -M:lint
       - run: clojure -M:coverage
+      - name: Check differential harness syntax
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
