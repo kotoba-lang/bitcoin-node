@@ -34,6 +34,10 @@ the pinned kernel CI covers all 500 official legacy sighash outcomes.
 Block validation rejects all witness serialization before the network's
 SegWit activation height, even when a coinbase commitment is present, and
 enforces BIP141 commitments only after activation.
+Taproot forward-compatible leaf versions, `OP_SUCCESS`, and unknown tapscript
+public-key types retain consensus anyone-can-spend behavior; callers can opt
+into Bitcoin Core's corresponding policy-only discouragement flags without
+changing block validation.
 Prevout Script validation independently follows Core's retroactive
 P2SH/WITNESS/TAPROOT flags and exact historical exception composition.
 BIP30 collision checks use Core's parent-view scan, pinned BIP34-chain

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.45.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.37.0 for explicit Bitcoin Core-compatible
+  policy rejection of unknown Taproot leaf versions, `OP_SUCCESS`, and
+  upgradable tapscript public-key types while preserving consensus acceptance.
+
 ## 0.44.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.36.0 and explicitly separate local
