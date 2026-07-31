@@ -128,6 +128,30 @@
            (get-in severe [:peers (pool/peer-id configuration)
                            :cooldown-until])))))
 
+(deftest consensus-rejected-block-sources-enter-durable-severe-cooldown
+  (doseq [error-type [:bitcoin.node/peer-invalid-block
+                      :bitcoin.node/peer-mutated-block]]
+    (let [configuration {:host "bad-body" :network :regtest}
+          directory
+          (Files/createTempDirectory
+           "bitcoin-peer-feedback-" (make-array FileAttribute 0))
+          path (.resolve directory "pool.bin")
+          state (atom (pool/create [configuration]))]
+      (try
+        (let [status
+              (pool/report-block-validation-failure!
+               state configuration 1000 error-type {:pool-path path})
+              persisted (pool/load! path)
+              entry (get-in persisted
+                            [:peers (pool/peer-id configuration)])]
+          (is (= error-type (:last-error entry)))
+          (is (= (+ 1000 pool/maximum-cooldown-ms)
+                 (:cooldown-until entry)))
+          (is (= 1 (:cooling-down status))))
+        (finally
+          (Files/deleteIfExists path)
+          (Files/deleteIfExists directory))))))
+
 (deftest peer-service-masks-cover-exactly-the-wire-uint64-domain
   (is (= peer/maximum-service-mask
          (get-in

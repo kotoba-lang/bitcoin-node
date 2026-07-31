@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.41.0 — 2026-07-31
+
+- Retain an exact source peer alongside every chronologically ordered block
+  body through parallel download and deterministic failover.
+- Feed definitive invalid and retryable mutated-body validation failures back
+  into the durable peer pool with maximum cooldown, while leaving local host
+  capability and ancestry failures unattributed.
+- Upgrade to `bitcoin-consensus` v0.35.0 so witness malleation cannot
+  permanently poison an otherwise valid header.
+
 ## 0.40.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.34.3 and permanently quarantine definitive

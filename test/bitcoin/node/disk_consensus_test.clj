@@ -684,6 +684,59 @@
             (is (= 1 (count (:failures result))))
             (is (disk/ready? node))))))))
 
+(deftest managed-block-sync-attributes-consensus-rejection-to-body-source
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            value (fixture/mine-regtest-block genesis 1)
+            hash (get-in value [:header :hash])
+            raw (block/serialize value)
+            source {:host "invalid-body" :network :regtest}
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            pool-atom (atom ::pool)
+            feedback (atom nil)]
+        (disk/accept-headers!
+         node [(get-in value [:header :bytes])] 2000000000)
+        (with-redefs
+         [peer-pool/download-blocks!
+          (fn [_ requested _]
+            (is (= [hash] requested))
+            {:status :downloaded
+             :downloaded 1
+             :blocks [raw]
+             :block-sources [source]
+             :observations [] :failures []})
+          disk/accept-block!
+          (fn [& _]
+            (throw
+             (ex-info
+              "definitive invalid block"
+              {:type :bitcoin.consensus/bad-coinbase-amount
+               :invalid-block-hash "invalid"
+               :block-validation-result :invalid
+               :consensus-invalid? true})))
+          peer-pool/report-block-validation-failure!
+          (fn [actual-pool peer now error-type options]
+            (reset! feedback
+                    [actual-pool peer now error-type options]))]
+          (let [error
+                (try
+                  (disk/sync-blocks-managed!
+                   node pool-atom 2000000000
+                   {:max-blocks 1 :now-ms 1234
+                    :pool-path "peer-pool.bin"})
+                  (catch clojure.lang.ExceptionInfo value value))]
+            (is (= :bitcoin.consensus/bad-coinbase-amount
+                   (:type (ex-data error))))
+            (is (= [pool-atom source 1234
+                    :bitcoin.node/peer-invalid-block
+                    {:pool-path "peer-pool.bin"}]
+                   @feedback))))))))
+
 (deftest disk-consensus-reorganizes-with-durable-undo
   (with-store
     (fn [path]

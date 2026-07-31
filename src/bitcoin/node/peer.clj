@@ -725,15 +725,17 @@
                 (sync/create scheduler-hashes) peer-order)]
     (if (empty? hashes)
       {:status :downloaded :downloaded 0 :blocks []
-       :observations [] :failures []}
+       :block-sources [] :observations [] :failures []}
       (loop [scheduler initial
              downloaded {}
+             sources {}
              observations {}
              failures []]
         (if (= (count hashes) (count downloaded))
           {:status :downloaded
            :downloaded (count downloaded)
            :blocks (mapv downloaded hashes)
+           :block-sources (mapv sources hashes)
            :observations
            (mapv observations (filter observations peer-order))
            :failures failures}
@@ -813,6 +815,13 @@
                          (seq accepted)
                          (update :blocks into accepted)
 
+                         (seq accepted)
+                         (update :sources
+                                 (fn [values]
+                                   (reduce (fn [sources [hash _]]
+                                             (assoc sources hash peer))
+                                           values accepted)))
+
                          terminal-error
                          (update :failed conj failure')
 
@@ -831,12 +840,14 @@
                                 :downloaded
                                 (+ (or (:downloaded previous) 0)
                                    (count accepted))})))))))
-                   {:state assigned :blocks [] :evidence observations
+                   {:state assigned :blocks [] :sources sources
+                    :evidence observations
                     :failed []}
                    results)]
               (recur
                (:state next)
                (into downloaded (:blocks next))
+               (:sources next)
                (:evidence next)
                (into failures (:failed next))))))))))
 

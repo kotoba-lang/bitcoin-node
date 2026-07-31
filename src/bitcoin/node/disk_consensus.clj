@@ -974,6 +974,28 @@
         :more? more?
         :consensus (consensus-status node)}))))
 
+(defn- accept-managed-block!
+  [node pool-atom source raw now options]
+  (try
+    (accept-block! node raw now)
+    (catch clojure.lang.ExceptionInfo error
+      (let [feedback-type
+            (cond
+              (chainstate/invalid-block-error? error)
+              :bitcoin.node/peer-invalid-block
+
+              (chainstate/mutated-block-error? error)
+              :bitcoin.node/peer-mutated-block
+
+              :else nil)]
+        (when (and feedback-type source)
+          (peer-pool/report-block-validation-failure!
+           pool-atom source
+           (or (:now-ms options) (System/currentTimeMillis))
+           feedback-type
+           {:pool-path (:pool-path options)})))
+      (throw error))))
+
 (defn sync-blocks-managed!
   "Download and commit best-chain blocks through a managed multi-peer pool.
 
@@ -1009,9 +1031,12 @@
                (peer-pool/download-blocks!
                 pool-atom hashes
                 (dissoc options :max-blocks))
-               raws (:blocks result)]
-           (doseq [raw raws]
-             (accept-block! node raw now))
+               raws (:blocks result)
+               sources (:block-sources result)]
+           (doseq [[raw source]
+                   (map vector raws (concat sources (repeat nil)))]
+             (accept-managed-block!
+              node pool-atom source raw now options))
            (let [count' (count raws)
                  downloaded' (+ downloaded count')
                  remaining' (- remaining count')

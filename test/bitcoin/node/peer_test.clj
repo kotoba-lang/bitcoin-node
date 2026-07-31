@@ -461,6 +461,9 @@
        (is (= 4 (:downloaded result)))
        (is (= (mapv raws hashes) (:blocks result))
            "network completion order must not change chain commit order")
+       (is (= ["peer-a" "peer-b" "peer-b" "peer-b"]
+              (mapv :host (:block-sources result)))
+           "each chronological body retains its actual source peer")
        (is (= :bitcoin.node/peer-timeout
               (get-in result [:failures 0 :type])))
        (is (= "peer-a"
@@ -497,6 +500,7 @@
             [requested]
             {:parallel-peers 1})]
        (is (= [(block/serialize block-1)] (:blocks result)))
+       (is (= ["honest"] (mapv :host (:block-sources result))))
        (is (= ["equivocating" "honest"] @attempts))
        (is (= :bitcoin.node/block-response-mismatch
               (get-in result [:failures 0 :type])))

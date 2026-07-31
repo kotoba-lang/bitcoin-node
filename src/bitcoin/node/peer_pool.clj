@@ -220,7 +220,9 @@
                   :bitcoin.node/peer-checksum
                   :bitcoin.node/peer-oversized-message
                   :bitcoin.node/peer-unrequested-block
-                  :bitcoin.node/block-response-mismatch}
+                  :bitcoin.node/block-response-mismatch
+                  :bitcoin.node/peer-invalid-block
+                  :bitcoin.node/peer-mutated-block}
                 error-type)
                cooldown
                (if severe?
@@ -420,6 +422,20 @@
              "Peer pool snapshot does not exist."
              {:path (str path)}))
     (decode (Files/readAllBytes target))))
+
+(defn report-block-validation-failure!
+  "Apply and optionally persist severe feedback for a block's source peer.
+
+  Network download success is provisional until consensus validates the body.
+  This second-stage report prevents the same peer from immediately supplying
+  another invalid or mutated body on the next synchronization cycle."
+  [pool-atom configuration now error-type
+   {:keys [elapsed-ms pool-path]}]
+  (swap! pool-atom record-failure
+         configuration now error-type (or elapsed-ms 0))
+  (when pool-path
+    (save! pool-path @pool-atom))
+  (status @pool-atom now))
 
 (defn- public-ipv4? [^InetAddress address]
   (when (instance? Inet4Address address)
