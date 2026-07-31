@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.32.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.30.0 for Bitcoin Core-identical compact
+  target decoding at the exponent-33/34 and 256-bit overflow boundaries.
+- Preserve fail-closed initial-context header validation for negative, zero,
+  and overflowing compact targets.
+
 ## 0.29.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.27.0 so historical BIP30 replacement is

@@ -36,6 +36,9 @@ optimization, and height 1,983,702 recheck boundary. Replacement applies only
 to coinbase outputs; non-coinbase outpoint collisions remain forbidden.
 BIP9 deployment state uses Core's exact start/timeout and
 threshold/timeout transition precedence at period boundaries.
+Compact proof-of-work targets use Core's exact `SetCompact` boundaries,
+including valid exponent-33/34 encodings whose mantissa still fits 256 bits
+and rejection of their adjacent negative or overflow encodings.
 The disk UTXO layer matches Core's `IsUnspendable` rule for `OP_RETURN` and
 scripts above 10,000 bytes; schema-v7 migration repairs legacy current coins
 but requires authenticated reindex when undo proves an impossible spend.
