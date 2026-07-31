@@ -732,6 +732,9 @@
                   (catch clojure.lang.ExceptionInfo value value))]
             (is (= :bitcoin.consensus/bad-coinbase-amount
                    (:type (ex-data error))))
+            (is (= source (:source-peer (ex-data error))))
+            (is (= :bitcoin.node/peer-invalid-block
+                   (:peer-feedback (ex-data error))))
             (is (= [pool-atom source 1234
                     :bitcoin.node/peer-invalid-block
                     {:pool-path "peer-pool.bin"}]

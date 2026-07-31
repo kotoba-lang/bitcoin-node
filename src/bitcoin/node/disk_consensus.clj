@@ -993,8 +993,16 @@
            pool-atom source
            (or (:now-ms options) (System/currentTimeMillis))
            feedback-type
-           {:pool-path (:pool-path options)})))
-      (throw error))))
+           {:pool-path (:pool-path options)}))
+        (if (and feedback-type source)
+          (throw
+           (ex-info
+            (.getMessage error)
+            (assoc (ex-data error)
+                   :source-peer source
+                   :peer-feedback feedback-type)
+            error))
+          (throw error))))))
 
 (defn sync-blocks-managed!
   "Download and commit best-chain blocks through a managed multi-peer pool.

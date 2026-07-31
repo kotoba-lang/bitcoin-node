@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.41.1 — 2026-07-31
+
+- Preserve bounded source-peer and applied-feedback evidence on validation
+  errors so supervisors can explain which provider entered severe cooldown.
+
 ## 0.41.0 — 2026-07-31
 
 - Retain an exact source peer alongside every chronologically ordered block
