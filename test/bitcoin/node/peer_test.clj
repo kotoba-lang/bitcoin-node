@@ -1,5 +1,7 @@
 (ns bitcoin.node.peer-test
   (:require [bitcoin.consensus.block :as block]
+            [bitcoin.consensus.codec :as codec]
+            [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.peer :as peer]
             [clojure.test :refer [deftest is]]
@@ -124,6 +126,70 @@
                (:block-request @server-result)))
         (finally
           (peer/close! connection))))))
+
+(deftest authenticated-compact-filter-round-trip
+  (with-open [server (ServerSocket. 0)]
+    (let [magic (get-in peer/network-configuration [:regtest :magic])
+          block-hash (vec (range 32))
+          previous-header (vec (repeat 32 0))
+          encoded (compact-filter/encode block-hash [[1 2 3] [4 5]])
+          filter-hash (compact-filter/filter-hash encoded)
+          expected-header
+          (compact-filter/filter-header encoded previous-header)
+          served
+          (future
+            (with-open [^Socket socket (.accept server)
+                        input (DataInputStream. (.getInputStream socket))
+                        output (DataOutputStream. (.getOutputStream socket))]
+              (is (= "version" (:command (read-message input))))
+              (send-message!
+               output magic "version"
+               (protocol/encode-version-payload
+                {:services peer/node-compact-filters-service
+                 :timestamp 1 :nonce 2 :start-height 10}))
+              (send-message! output magic "verack" [])
+              (is (= "verack" (:command (read-message input))))
+              (let [request (read-message input)]
+                (is (= "getcfheaders" (:command request)))
+                (is (= (vec (concat [0] (codec/uint-le 10 4) block-hash))
+                       (:payload request)))
+                (send-message!
+                 output magic "cfheaders"
+                 (vec
+                  (concat [0] block-hash previous-header
+                          (codec/compact-size 1) filter-hash))))
+              (let [request (read-message input)]
+                (is (= "getcfilters" (:command request)))
+                (is (= (vec (concat [0] (codec/uint-le 10 4) block-hash))
+                       (:payload request)))
+                (send-message!
+                 output magic "cfilter"
+                 (vec
+                  (concat [0] block-hash
+                          (codec/compact-size (count encoded)) encoded))))))
+          connection
+          (peer/connect!
+           {:host "127.0.0.1" :port (.getLocalPort server)
+            :network :regtest :timeout-ms 5000
+            :required-services peer/node-compact-filters-service})]
+      (try
+        (is (= [{:filter-hash filter-hash :header expected-header}]
+               (peer/get-basic-filter-headers!
+                connection 10 10 block-hash previous-header)))
+        (is (= encoded
+               (peer/get-basic-filter!
+                connection 10 block-hash previous-header expected-header)))
+        (is (= :bitcoin.node/peer-compact-filters-unavailable
+               (:type
+                (ex-data
+                 (try
+                   (peer/get-basic-filter-headers!
+                    (assoc connection :peer-version {:services 0})
+                    10 10 block-hash previous-header)
+                   (catch clojure.lang.ExceptionInfo error error))))))
+        (finally
+          (peer/close! connection)))
+      @served)))
 
 (deftest obsolete-peer-version-fails-closed
   (with-open [server (ServerSocket. 0)]

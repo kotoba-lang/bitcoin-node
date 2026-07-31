@@ -4,6 +4,7 @@
   It performs version/verack, answers ping, and requests headers in protocol
   batches. Transaction relay, wallet, mempool, and mining commands are absent."
   (:require [bitcoin.consensus.codec :as codec]
+            [bitcoin.node.compact-filter :as compact-filter]
             [clojure.string :as str]
             [kotobase.bitcoin.protocol :as protocol])
   (:import [java.io DataInputStream DataOutputStream EOFException]
@@ -26,8 +27,10 @@
 (def minimum-peer-version 31800)
 (def node-network-service 1)
 (def node-network-limited-service 1024)
+(def node-compact-filters-service 64)
 (def maximum-service-mask 18446744073709551615N)
 (def witness-block-inventory-type 0x40000002)
+(def maximum-filter-headers 2000)
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
@@ -127,7 +130,7 @@
   [{:keys [host port network timeout-ms start-height user-agent
            required-services]
     :or {host "127.0.0.1" network :mainnet timeout-ms 10000
-         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.9.0/"
+         start-height 0 user-agent "/kotoba-lang:bitcoin-node:0.36.0/"
          required-services 0}}]
   (let [base-config (get network-configuration network)]
     (when-not base-config
@@ -293,6 +296,154 @@
                   {:type :bitcoin.node/peer-timeout
                    :operation :block}
                   error))))))
+
+(defn- compact-filter-service! [connection]
+  (when-not
+   (.testBit
+    (biginteger (get-in connection [:peer-version :services]))
+    6)
+    (fail! :bitcoin.node/peer-compact-filters-unavailable
+           "Bitcoin peer did not advertise NODE_COMPACT_FILTERS."
+           {:services (get-in connection [:peer-version :services])})))
+
+(defn- compact-filter-request-payload [start-height stop-hash]
+  (when-not (and (integer? start-height)
+                 (<= 0 start-height 0xffffffff)
+                 (= 32 (count stop-hash)))
+    (fail! :bitcoin.node/peer-compact-filter-request
+           "Compact-filter requests require a uint32 height and 32-byte hash."
+           {:start-height start-height
+            :stop-hash-length (count stop-hash)}))
+  (vec (concat [0] (codec/uint-le start-height 4) stop-hash)))
+
+(defn- await-command! [connection operation expected-command]
+  (let [deadline (deadline-nanos (:timeout-ms connection))]
+    (try
+      (loop []
+        (let [message
+              (read-message-until!
+               connection deadline operation (:magic connection))
+              _ (handle-control! connection message)]
+          (if (= expected-command (:command message))
+            (:payload message)
+            (recur))))
+      (catch SocketTimeoutException error
+        (throw
+         (ex-info "Bitcoin peer compact-filter request timed out."
+                  {:type :bitcoin.node/peer-timeout
+                   :operation operation}
+                  error))))))
+
+(defn get-basic-filter-headers!
+  "Fetch and authenticate at most 2,000 consecutive BIP157 basic headers.
+
+  `expected-previous-header` is a natural-order trusted or cross-checked
+  anchor. A single peer's filter-header chain is not consensus data, so callers
+  must retain the anchor and compare independent peers before scanning."
+  [connection start-height stop-height stop-hash expected-previous-header]
+  (compact-filter-service! connection)
+  (when-not (and (integer? stop-height)
+                 (<= start-height stop-height 0xffffffff)
+                 (< (- stop-height start-height)
+                    maximum-filter-headers))
+    (fail! :bitcoin.node/peer-compact-filter-request
+           "Compact-filter header ranges must contain 1..2,000 blocks."
+           {:start-height start-height :stop-height stop-height
+            :limit maximum-filter-headers}))
+  (when-not (= 32 (count expected-previous-header))
+    (fail! :bitcoin.node/peer-compact-filter-anchor
+           "Compact-filter header synchronization requires a 32-byte anchor."
+           {:length (count expected-previous-header)}))
+  (write-message!
+   (:output connection) (:magic connection) "getcfheaders"
+   (compact-filter-request-payload start-height stop-hash))
+  (let [payload (vec (await-command! connection :cfheaders "cfheaders"))
+        [filter-type offset] (codec/read-uint-le payload 0 1)
+        [actual-stop offset] (codec/read-bytes payload offset 32)
+        [previous-header offset] (codec/read-bytes payload offset 32)
+        [count-value offset] (codec/read-compact-size payload offset)]
+    (when-not (zero? filter-type)
+      (fail! :bitcoin.node/peer-compact-filter-type
+             "Peer returned an unsupported compact-filter type."
+             {:filter-type filter-type}))
+    (when-not (= stop-hash actual-stop)
+      (fail! :bitcoin.node/peer-compact-filter-stop
+             "Peer returned compact-filter headers for another stop block."
+             {:requested stop-hash :actual actual-stop}))
+    (when-not (= expected-previous-header previous-header)
+      (fail! :bitcoin.node/peer-compact-filter-anchor
+             "Peer compact-filter header response does not extend the anchor."
+             {:expected expected-previous-header :actual previous-header}))
+    (when (> count-value maximum-filter-headers)
+      (fail! :bitcoin.node/peer-compact-filter-count
+             "Peer returned too many compact-filter hashes."
+             {:count count-value :limit maximum-filter-headers}))
+    (let [expected-count (inc (- stop-height start-height))]
+      (when-not (= expected-count count-value)
+        (fail! :bitcoin.node/peer-compact-filter-count
+               "Peer omitted or added compact-filter hashes."
+               {:expected expected-count :actual count-value
+                :start-height start-height :stop-height stop-height})))
+    (let [[hash-bytes end]
+          (codec/read-bytes payload offset (* count-value 32))]
+      (when-not (= end (count payload))
+        (fail! :bitcoin.node/peer-compact-filter-trailing-data
+               "Peer compact-filter header response contains trailing data."
+               {:offset end :length (count payload)}))
+      (second
+       (reduce
+        (fn [[previous result] filter-hash-value]
+          (let [header
+                (compact-filter/next-header-from-hash
+                 filter-hash-value previous)]
+            [header
+             (conj result
+                   {:filter-hash filter-hash-value :header header})]))
+        [previous-header []]
+        (mapv vec (partition 32 hash-bytes)))))))
+
+(defn get-basic-filter!
+  "Fetch one BIP158 filter and authenticate it against an expected header.
+
+  The encoded filter is returned only after strict GCS decoding, response
+  correlation, and BIP157 header verification."
+  [connection height block-hash previous-header expected-header]
+  (compact-filter-service! connection)
+  (when-not (and (= 32 (count previous-header))
+                 (= 32 (count expected-header)))
+    (fail! :bitcoin.node/peer-compact-filter-anchor
+           "Compact-filter verification requires two 32-byte headers."
+           {:previous-length (count previous-header)
+            :expected-length (count expected-header)}))
+  (write-message!
+   (:output connection) (:magic connection) "getcfilters"
+   (compact-filter-request-payload height block-hash))
+  (let [payload (vec (await-command! connection :cfilter "cfilter"))
+        [filter-type offset] (codec/read-uint-le payload 0 1)
+        [actual-block offset] (codec/read-bytes payload offset 32)
+        [encoded end]
+        (codec/read-var-bytes
+         payload offset protocol/max-protocol-payload-bytes "compact filter")]
+    (when-not (= end (count payload))
+      (fail! :bitcoin.node/peer-compact-filter-trailing-data
+             "Peer compact-filter response contains trailing data."
+             {:offset end :length (count payload)}))
+    (when-not (zero? filter-type)
+      (fail! :bitcoin.node/peer-compact-filter-type
+             "Peer returned an unsupported compact-filter type."
+             {:filter-type filter-type}))
+    (when-not (= block-hash actual-block)
+      (fail! :bitcoin.node/peer-unrequested-compact-filter
+             "Peer returned a compact filter for another block."
+             {:requested block-hash :actual actual-block}))
+    (compact-filter/decode-values encoded)
+    (let [actual-header
+          (compact-filter/filter-header encoded previous-header)]
+      (when-not (= expected-header actual-header)
+        (fail! :bitcoin.node/peer-compact-filter-header
+               "Peer compact filter does not match its authenticated header."
+               {:expected expected-header :actual actual-header})))
+    encoded))
 
 (defn sync-headers!
   "Drive sequential getheaders batches through a validating batch callback.

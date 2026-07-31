@@ -53,6 +53,17 @@ but requires authenticated reindex when undo proves an impossible spend.
 Input values, transaction input totals, and accumulated block fees use Core's
 exact `MoneyRange` boundary.
 
+`bitcoin.node.compact-filter` implements BIP158 basic-filter construction,
+strict decoding, membership matching, and BIP157 filter-hash/header chaining.
+Its output matches all 10 SHA-256-pinned Bitcoin Core v31.1
+`blockfilters.json` cases. `bitcoin.node.peer` requests `cfheaders` and
+`cfilter` only from peers advertising `NODE_COMPACT_FILTERS`; it correlates
+the stop block, requires the exact requested header count, extends an explicit
+local anchor, strictly decodes the GCS payload, and authenticates each filter
+against its expected header before returning it. Compact filters are
+non-consensus hints: callers must retain trusted local anchors and compare
+independent peers before treating a negative match as a scan result.
+
 `bitcoin.node.disk-consensus` is the mainnet-scale embedded host. It validates
 headers and blocks, selects the most-work chain, and atomically commits the
 resulting UTXO delta, active-chain undo journals, and checksummed fork-choice
@@ -99,6 +110,13 @@ most-work fork choice select state. It deliberately has no transaction relay,
 mempool, wallet, signing, or mining commands. Retained blocks can be requested
 individually with witness data; the response header must match the requested
 hash before the raw block is returned to the full consensus validator.
+
+```bash
+clojure -M:test
+clojure -M:lint
+clojure -M:coverage
+./scripts/core_blockfilter_vectors.sh
+```
 
 `bitcoin.node.peer-pool` bootstraps bounded public IPv4 candidates from the
 Bitcoin Core DNS seed set, then rotates peers using local success, failure,

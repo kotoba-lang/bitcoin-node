@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.36.0 — 2026-07-31
+
+- Implement BIP158 basic compact-filter construction, strict decoding,
+  membership matching, filter hashes, and BIP157 header chaining.
+- Match all 10 SHA-256-pinned Bitcoin Core v31.1 `blockfilters.json` cases in
+  CI, including empty scripts, OP_RETURN exclusion, duplicate elements,
+  witness scripts, and malformed output scripts.
+- Add bounded `getcfheaders` and `getcfilters` P2P requests gated by
+  `NODE_COMPACT_FILTERS`, with exact range correlation, explicit anchor
+  extension, strict GCS validation, and authenticated expected headers.
+- Keep compact filters outside the consensus boundary and require consumers to
+  retain anchors and compare independent peers before trusting negative scans.
+
 ## 0.35.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.33.0 for Core-identical legacy
