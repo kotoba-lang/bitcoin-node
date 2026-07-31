@@ -31,8 +31,9 @@ SegWit activation height, even when a coinbase commitment is present, and
 enforces BIP141 commitments only after activation.
 Prevout Script validation independently follows Core's retroactive
 P2SH/WITNESS/TAPROOT flags and exact historical exception composition.
-Historical BIP30 replacement applies only to coinbase outputs; non-coinbase
-outpoint collisions remain forbidden.
+BIP30 collision checks use Core's parent-view scan, pinned BIP34-chain
+optimization, and height 1,983,702 recheck boundary. Replacement applies only
+to coinbase outputs; non-coinbase outpoint collisions remain forbidden.
 The disk UTXO layer matches Core's `IsUnspendable` rule for `OP_RETURN` and
 scripts above 10,000 bytes; schema-v7 migration repairs legacy current coins
 but requires authenticated reindex when undo proves an impossible spend.
