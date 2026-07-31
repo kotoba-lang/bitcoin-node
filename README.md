@@ -43,7 +43,8 @@ multi-block reorganizations, and process restarts retain one consistent
 security boundary. Both sequential and batch header ingestion enforce buried
 BIP34, BIP66, and BIP65 block-version floors plus testnet4's BIP94 600-second
 adjustment-boundary timewarp rule. Block bodies never enter the checksummed
-EDN host metadata.
+tree when their context-free legacy sigop count exceeds Core's 20,000-operation
+limit, and raw block bodies never enter the checksummed EDN host metadata.
 Validated side-branch bodies are retained as bounded raw SQLite values and
 rehydrated only along a candidate activation path. Attached staging rows are
 deleted in the same UTXO reorganization transaction; a detached branch must

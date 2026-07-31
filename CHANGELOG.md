@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.27.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.25.0 so excessive legacy sigops are
+  rejected before active or side-chain block bodies enter node storage.
+- Preserve full prevout-aware P2SH and witness sigop validation during atomic
+  UTXO connection.
+
 ## 0.24.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.22.0 so output scripts above Core's
