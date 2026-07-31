@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.44.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.36.0 and explicitly separate local
+  chain-history, storage, verifier, and resource failures from candidate block
+  invalidity.
+- Stop managed synchronization immediately for pruned undo, missing block
+  bodies, SQLite ancestry failures, and pending limits without retrying or
+  cooling down the innocent provider.
+
 ## 0.43.0 — 2026-07-31
 
 - Retry invalid or mutated provider bodies from another eligible peer inside

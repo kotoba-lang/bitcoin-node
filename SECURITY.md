@@ -36,4 +36,6 @@ boundary. Failed peers cannot
 make unfinished assignments disappear: they are requeued and the typed failure
 enters the durable cooldown history. Invalid and mutated provider bodies retry
 inside the same bounded cycle after preserving its committed prefix; local
-verifier or ancestry failures stop without peer attribution.
+verifier, pruned history, missing body, SQLite, and resource-limit failures
+stop without peer attribution or branch invalidation. Operators must recover
+the local capability or data before resuming synchronization.

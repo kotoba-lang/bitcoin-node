@@ -755,42 +755,50 @@
             (is (zero? (:invalid-blocks status)))))))))
 
 (deftest managed-sync-does-not-blame-or-retry-a-local-validation-failure
-  (with-store
-    (fn [path]
-      (let [genesis
-            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
-            value (fixture/mine-regtest-block genesis 1)
-            node
-            (disk/open {:path path :network :regtest
-                        :genesis-bytes
-                        (fixture/hex->bytes fixture/regtest-genesis)})
-            attempts (atom 0)
-            feedback (atom false)]
-        (disk/accept-headers!
-         node [(get-in value [:header :bytes])] 2000000000)
-        (with-redefs
-         [peer-pool/download-blocks!
-          (fn [& _]
-            (swap! attempts inc)
-            {:blocks [(block/serialize value)]
-             :block-sources [{:host "innocent" :network :regtest}]
-             :observations [] :failures []})
-          disk/accept-block!
-          (fn [& _]
-            (throw
-             (ex-info "local verifier unavailable"
-                      {:type :bitcoin.consensus/missing-script-verifier})))
-          peer-pool/report-block-validation-failure!
-          (fn [& _] (reset! feedback true))]
-          (let [error
-                (try
-                  (disk/sync-blocks-managed!
-                   node (atom ::pool) 2000000000 {:max-blocks 1})
-                  (catch clojure.lang.ExceptionInfo value value))]
-            (is (= :bitcoin.consensus/missing-script-verifier
-                   (:type (ex-data error))))
-            (is (= 1 @attempts))
-            (is (false? @feedback))))))))
+  (doseq [failure-type
+          [:bitcoin.consensus/missing-script-verifier
+           :bitcoin.consensus/undo-pruned
+           :bitcoin.consensus/missing-block-data
+           :bitcoin.consensus/sqlite-header-ancestry
+           :bitcoin.consensus/pending-block-limit]]
+    (with-store
+      (fn [path]
+        (let [genesis
+              (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+              value (fixture/mine-regtest-block genesis 1)
+              node
+              (disk/open {:path path :network :regtest
+                          :genesis-bytes
+                          (fixture/hex->bytes fixture/regtest-genesis)})
+              attempts (atom 0)
+              feedback (atom false)]
+          (disk/accept-headers!
+           node [(get-in value [:header :bytes])] 2000000000)
+          (with-redefs
+           [peer-pool/download-blocks!
+            (fn [& _]
+              (swap! attempts inc)
+              {:blocks [(block/serialize value)]
+               :block-sources [{:host "innocent" :network :regtest}]
+               :observations [] :failures []})
+            disk/accept-block!
+            (fn [& _]
+              (throw
+               (ex-info "local consensus host failure"
+                        {:type failure-type})))
+            peer-pool/report-block-validation-failure!
+            (fn [& _] (reset! feedback true))]
+            (let [error
+                  (try
+                    (disk/sync-blocks-managed!
+                     node (atom ::pool) 2000000000 {:max-blocks 1})
+                    (catch clojure.lang.ExceptionInfo value value))]
+              (is (= failure-type (:type (ex-data error))))
+              (is (= :local
+                     (chainstate/block-validation-result error)))
+              (is (nil? (:peer-feedback (ex-data error))))
+              (is (= 1 @attempts))
+              (is (false? @feedback)))))))))
 
 (deftest managed-sync-bounds-repeated-validation-rejections
   (with-store

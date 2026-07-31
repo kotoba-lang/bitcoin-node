@@ -74,7 +74,10 @@ headers and blocks, selects the most-work chain, and atomically commits the
 resulting UTXO delta, active-chain undo journals, and checksummed fork-choice
 metadata to one SQLite database. Header-only progress, side-chain blocks,
 multi-block reorganizations, and process restarts retain one consistent
-security boundary. Both sequential and batch header ingestion enforce buried
+security boundary. Pruned undo, missing local block data, SQLite ancestry or
+integrity failures, unavailable verification, and local resource limits are
+reported as recovery-required host failures; they never invalidate a candidate
+branch or punish its block provider. Both sequential and batch header ingestion enforce buried
 BIP34, BIP66, and BIP65 block-version floors plus testnet4's BIP94 600-second
 adjustment-boundary timewarp rule. Block bodies never enter the checksummed
 tree when their context-free legacy sigop count exceeds Core's 20,000-operation
