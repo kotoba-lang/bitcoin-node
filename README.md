@@ -451,6 +451,11 @@ If a pruned node no longer has the requested post-snapshot range it fails
 before importing state. `CONSENSUS_GENESIS_HEX` is needed only when Core has
 also pruned the genesis block and no header checkpoint exists.
 
+Applications can bind a retained evidence target to the currently served
+local chain with `disk-consensus/active-block-hash-at-height`. The lookup is
+bounded to one validated height and uses normalized SQLite ancestry; it does
+not consult Core, an explorer, or a peer.
+
 On an archival Core, set `CONSENSUS_BACKGROUND_VALIDATE=true` to replay blocks
 1 through the snapshot base into the independent disk chainstate, reopen it at
 the configured interval, recompute the base commitment, and require the final

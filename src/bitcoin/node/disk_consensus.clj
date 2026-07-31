@@ -713,6 +713,27 @@
          (= (:height status)
             (chainstate/active-height @(:state node))))))
 
+(defn active-block-hash-at-height
+  "Return the locally validated active-chain hash at `height`.
+
+  This is an ancestry proof against the currently opened durable chainstate,
+  not a network lookup. It is suitable for binding historical differential
+  evidence to the chain the application is actually serving."
+  [node height]
+  (locking node
+    (let [current-height (:height (sqlite/status (:backend node)))]
+      (when-not (and (integer? height) (<= 0 height current-height))
+        (fail! :bitcoin.node/active-chain-height
+               "Active-chain evidence height is outside the validated chain."
+               {:height height :current-height current-height}))
+      (let [state @(:state node)
+            ancestor
+            (cached-ancestor-node node state (:active-tip state) height)]
+        (or (:hash ancestor)
+            (fail! :bitcoin.node/missing-active-ancestor
+                   "Validated active-chain ancestry is unavailable."
+                   {:height height :current-height current-height}))))))
+
 (defn lookup [node outpoint]
   (sqlite/lookup (:backend node) outpoint))
 

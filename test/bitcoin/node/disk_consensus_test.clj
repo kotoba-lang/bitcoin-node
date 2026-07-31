@@ -800,6 +800,33 @@
               (is (= 1 @attempts))
               (is (false? @feedback)))))))))
 
+(deftest active-chain-height-lookup-binds-local-evidence-to-ancestry
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            block-1 (fixture/mine-regtest-block genesis 1)
+            block-2 (fixture/mine-regtest-block block-1 2)
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})]
+        (disk/accept-block! node (block/serialize block-1) 2000000000)
+        (disk/accept-block! node (block/serialize block-2) 2000000000)
+        (is (= (get-in genesis [:header :hash-hex])
+               (disk/active-block-hash-at-height node 0)))
+        (is (= (get-in block-1 [:header :hash-hex])
+               (disk/active-block-hash-at-height node 1)))
+        (is (= (get-in block-2 [:header :hash-hex])
+               (disk/active-block-hash-at-height node 2)))
+        (doseq [height [-1 3 nil]]
+          (is (= :bitcoin.node/active-chain-height
+                 (:type
+                  (ex-data
+                   (try
+                     (disk/active-block-hash-at-height node height)
+                     (catch clojure.lang.ExceptionInfo error error)))))))))))
+
 (deftest managed-sync-bounds-repeated-validation-rejections
   (with-store
     (fn [path]

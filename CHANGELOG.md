@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.47.0 — 2026-07-31
+
+- Expose bounded active-chain hash lookup from the durable SQLite ancestry so
+  applications can bind historical differential evidence to the exact local
+  chain they currently serve without trusting an external explorer.
+
 ## 0.46.0 — 2026-07-31
 
 - Exercise the real Core RPC to raw-block to disk-consensus to
