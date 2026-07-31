@@ -24,6 +24,9 @@ chainstate. It supports headers-first indexing and authenticated Bitcoin Core
 v2 AssumeUTXO activation while retaining a separate fully validated background
 chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
+The pinned kernel release additionally fails CI on host exceptions, untyped
+decoder failures, non-canonical raw round trips, or process timeout under a
+replayable transaction/block/legacy-Script/tapscript fuzz corpus.
 Transaction decoding uses weight-derived input, output, and witness limits,
 including unknown witness versions reserved for future soft forks. Transaction
 versions retain Core's unsigned 32-bit wire value, so values above

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.48.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.38.0, whose transaction, block, legacy
+  Script, and tapscript boundaries now run replayable bounded fuzzing on every
+  change plus a multi-seed nightly corpus.
+
 ## 0.47.0 — 2026-07-31
 
 - Expose bounded active-chain hash lookup from the durable SQLite ancestry so
