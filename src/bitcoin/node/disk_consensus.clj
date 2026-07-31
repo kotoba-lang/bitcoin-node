@@ -610,6 +610,8 @@
         undo (sqlite/undo-status (:backend node))
         tip (:active-tip state)
         best (:best-header state)
+        best-header-chainwork (get-in state [:nodes best :chainwork])
+        minimum-chainwork (get-in state [:consensus :minimum-chainwork])
         assumed? (= :assumed (get-in state [:snapshot :status]))
         background-status
         (when (and assumed? (:background node))
@@ -621,6 +623,10 @@
      :best-block tip
      :best-header best
      :best-header-height (get-in state [:nodes best :height])
+     :best-header-chainwork best-header-chainwork
+     :minimum-chainwork minimum-chainwork
+     :headers-presync-required?
+     (header/better-chain? minimum-chainwork best-header-chainwork)
      :chainwork (get-in state [:nodes tip :chainwork])
      :utxo-count (:coin-count durable)
      :pending-blocks (:pending-blocks pending)
@@ -801,8 +807,35 @@
   (or (get state locator-key)
       (computed-block-locator state)))
 
+(defn- headers-presync-context
+  "Capture the bounded, durable ancestry needed by two-phase header pre-sync."
+  [state now]
+  (let [tip (:best-header state)
+        tip-node (get-in state [:nodes tip])
+        context
+        (loop [hash tip remaining 2017 newest []]
+          (if (or (nil? hash) (zero? remaining))
+            (vec (reverse newest))
+            (let [node (get-in state [:nodes hash])]
+              (when-not node
+                (fail! :bitcoin.node/missing-header-node
+                       "Header pre-sync ancestry is incomplete."
+                       {:hash hash :tip tip}))
+              (recur (:parent node) (dec remaining)
+                     (conj newest (:header node))))))]
+    {:network (:network state)
+     :context context
+     :anchor-height (:height tip-node)
+     :anchor-chainwork (:chainwork tip-node)
+     :minimum-chainwork (get-in state [:consensus :minimum-chainwork])
+     :now now}))
+
 (defn sync-headers!
-  "Synchronize validated P2P header batches into this disk consensus node."
+  "Synchronize validated P2P header batches into this disk consensus node.
+
+  Below the network minimum-chainwork threshold, a peer must complete the
+  bounded commitment pre-sync/redownload protocol before any header is
+  durably indexed."
   ([node connection now]
    (sync-headers! node connection now {}))
   ([node connection now options]
@@ -811,7 +844,7 @@
      (peer/sync-headers!
       connection locator
       #(accept-headers! node (mapv :bytes %) now)
-      options))))
+      (assoc options :presync (headers-presync-context state now))))))
 
 (defn sync-headers-from-peers!
   "Synchronize from a bounded peer set, resuming from every durable batch.
@@ -826,7 +859,9 @@
     peer-configurations
     #(block-locator @(:state node))
     #(accept-headers! node (mapv :bytes %) now)
-    options)))
+    (assoc options
+           :presync-fn
+           #(headers-presync-context @(:state node) now)))))
 
 (defn sync-headers-managed!
   "Synchronize through a health-scored peer pool with cooldown and rotation."
@@ -837,7 +872,9 @@
     pool-atom
     #(block-locator @(:state node))
     #(accept-headers! node (mapv :bytes %) now)
-    options)))
+    (assoc options
+           :presync-fn
+           #(headers-presync-context @(:state node) now)))))
 
 (declare accept-block!)
 

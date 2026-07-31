@@ -383,14 +383,17 @@
        (is (= 1 (count @locators)))))))
 
 (deftest multiple-successful-peers-surface-chain-disagreement
-  (let [next-tip (atom 0)]
+  (let [next-tip (atom 0)
+        presync-calls (atom 0)
+        presync-anchors (atom [])]
     (with-redefs
      [peer/connect!
       (fn [{:keys [host]}]
         {:id host :peer-version {:start-height 2}})
       peer/close! (constantly nil)
       peer/sync-headers!
-      (fn [_ _ _ _]
+      (fn [_ _ _ options]
+        (swap! presync-anchors conj (get-in options [:presync :anchor]))
         (let [byte (swap! next-tip inc)]
           {:status :synced :batches 1 :accepted 1
            :locator (vec (repeat 32 byte))}))]
@@ -399,10 +402,14 @@
             [{:host "peer-a"} {:host "peer-b"}]
             #(vector (vec (repeat 32 0)))
             (constantly nil)
-            {:required-successes 2})]
+            {:required-successes 2
+             :presync-fn
+             #(hash-map :anchor (swap! presync-calls inc))})]
        (is (= 2 (:successful-peers result)))
        (is (true? (:disagreement? result)))
-       (is (= 2 (count (:observations result))))))))
+       (is (= 2 (count (:observations result))))
+       (is (= [1 2] @presync-anchors)
+           "each replacement peer must use a fresh durable pre-sync anchor")))))
 
 (deftest exhausted-peer-set-preserves-typed-failure-evidence
   (with-redefs

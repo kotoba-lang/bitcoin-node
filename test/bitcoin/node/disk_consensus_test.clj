@@ -442,7 +442,12 @@
              [peer/sync-headers!
               (fn [_ locator accept-batch! options]
                 (is (= [(get-in genesis [:header :hash])] locator))
-                (is (= {:max-batches 3} options))
+                (is (= 3 (:max-batches options)))
+                (is (= :regtest (get-in options [:presync :network])))
+                (is (= 0 (get-in options [:presync :anchor-height])))
+                (is (= [(get-in genesis [:header :hash-hex])]
+                       (mapv :hash-hex
+                             (get-in options [:presync :context]))))
                 (accept-batch! [(:header block-1) (:header block-2)])
                 {:status :synced :batches 1 :accepted 2})]
               (disk/sync-headers!
@@ -457,6 +462,58 @@
                   (get-in block-1 [:header :hash])
                   (get-in genesis [:header :hash])]
                  (disk/block-locator @(:state reopened)))))))))
+
+(deftest disk-header-sync-keeps-presync-headers-out-of-sqlite
+  (with-store
+    (fn [path]
+      (let [genesis (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            block-1 (fixture/mine-regtest-block genesis 1)
+            block-2 (fixture/mine-regtest-block block-1 2)
+            block-3 (fixture/mine-regtest-block block-2 3)
+            headers (mapv :header [block-1 block-2 block-3])
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})
+            anchor-work
+            (get-in @(:state node)
+                    [:nodes (:best-header @(:state node)) :chainwork])
+            minimum-work
+            (reduce
+             (fn [work value]
+               (header/add-chainwork
+                work (header/header-work (:bits value))))
+             anchor-work headers)
+            calls (atom 0)]
+        ;; Regtest normally has no minimum-chainwork. Raise it only for this
+        ;; integration fixture so the production disk boundary exercises both
+        ;; phases without requiring a historical public-chain corpus.
+        (swap! (:state node) assoc-in
+               [:consensus :minimum-chainwork] minimum-work)
+        (is (true? (:headers-presync-required?
+                    (disk/consensus-status node))))
+        (with-redefs
+         [peer/get-headers!
+          (fn [_ _]
+            (let [call (swap! calls inc)]
+              (case call
+                1 headers
+                2 (do
+                    (is (= 0 (:best-header-height
+                              (disk/consensus-status node)))
+                        "first-download headers must not be in SQLite")
+                    headers)
+                [])))]
+         (let [result
+               (disk/sync-headers! node ::connection 2000000000
+                                   {:max-batches 4})]
+           (is (= :synced (:status result)))
+           (is (= 3 (:accepted result)))
+           (is (= 3 (get-in result [:headers-presync :presynced])))
+           (is (= 3 (:best-header-height
+                     (disk/consensus-status node))))
+           (is (false? (:headers-presync-required?
+                        (disk/consensus-status node))))))))))
 
 (deftest multi-peer-disagreement-is-validated-and-resolved-by-local-work
   (with-store

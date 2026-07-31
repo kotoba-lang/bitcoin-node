@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.38.0 — 2026-07-31
+
+- Add Bitcoin Core-style two-phase header pre-sync below each public network's
+  minimum-chainwork threshold, keeping the first download outside durable
+  storage.
+- Retain salted periodic one-bit commitments and require a protected
+  redownload before releasing headers through a network-specific lookahead
+  buffer; use Bitcoin Core v31's generated commitment/buffer parameters.
+- Fully validate PoW, exact difficulty, linkage, MTP, and future time during
+  both phases, and fail closed on low-work short chains, commitment
+  equivocation, overruns, or MTP-impossible chain length.
+- Recompute the pre-sync anchor after peer failover and expose best-header
+  chainwork, required minimum chainwork, and pre-sync state in node status.
+
 ## 0.37.0 — 2026-07-31
 
 - Require byte-identical BIP157 filter-header agreement from a bounded set of

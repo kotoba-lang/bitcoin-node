@@ -5,6 +5,7 @@
   batches. Transaction relay, wallet, mempool, and mining commands are absent."
   (:require [bitcoin.consensus.codec :as codec]
             [bitcoin.node.compact-filter :as compact-filter]
+            [bitcoin.node.headers-sync :as headers-sync]
             [clojure.string :as str]
             [kotobase.bitcoin.protocol :as protocol])
   (:import [java.io DataInputStream DataOutputStream EOFException]
@@ -450,9 +451,14 @@
 
   `accept-batch!` receives decoded headers and must reject invalid linkage,
   PoW, difficulty, or time context before returning. Sync stops on a short
-  batch, an empty batch, or `max-batches`."
+  batch, an empty batch, or `max-batches`.
+
+  When `:presync` supplies a durable anchor context and minimum chainwork,
+  low-work chains are downloaded twice using salted periodic commitments.
+  No header reaches `accept-batch!` until the redownload is commitment
+  protected, matching Bitcoin Core's headers-sync anti-DoS boundary."
   [connection locator-hashes accept-batch!
-   {:keys [max-batches] :or {max-batches 10000}}]
+   {:keys [max-batches presync] :or {max-batches 10000}}]
   (when-not (ifn? accept-batch!)
     (fail! :bitcoin.node/peer-callback
            "Header synchronization requires a validating callback." {}))
@@ -460,24 +466,81 @@
     (fail! :bitcoin.node/peer-configuration
            "Header batch limit must be a positive integer."
            {:max-batches max-batches}))
-  (loop [locator locator-hashes batches 0 accepted 0]
+  (let [initial-presync
+        (when presync (headers-sync/create presync))]
+   (loop [locator
+          (if (= :presync (:phase initial-presync))
+            (headers-sync/locator initial-presync)
+            locator-hashes)
+          batches 0
+          accepted 0
+          security-state
+          (when (= :presync (:phase initial-presync)) initial-presync)
+          security-evidence nil]
     (if (= batches max-batches)
-      {:status :batch-limit :batches batches :accepted accepted
-       :locator (first locator)}
+      (if security-state
+        (headers-sync/require-complete! security-state)
+        (cond->
+         {:status :batch-limit :batches batches :accepted accepted
+          :locator (first locator)}
+          security-evidence (assoc :headers-presync security-evidence)))
       (let [headers (get-headers! connection locator)
-            count (count headers)]
-        (if (zero? count)
-          {:status :synced :batches (inc batches) :accepted accepted
-           :locator (first locator)}
-          (do
-            (accept-batch! headers)
-            (let [tip (:hash (last headers))
-                  result
-                  {:batches (inc batches) :accepted (+ accepted count)
-                   :locator tip}]
-              (if (< count protocol/max-headers-per-message)
-                (assoc result :status :synced)
-                (recur [tip] (inc batches) (+ accepted count))))))))))
+            header-count (count headers)]
+        (if (zero? header-count)
+          (if security-state
+            (headers-sync/require-complete! security-state)
+            (cond->
+             {:status :synced :batches (inc batches) :accepted accepted
+              :locator (first locator)}
+              security-evidence
+              (assoc :headers-presync security-evidence)))
+          (if security-state
+            (let [{next-security :state ready :ready}
+                  (headers-sync/process-batch security-state headers)
+                  _ (doseq [batch (partition-all
+                                   protocol/max-headers-per-message ready)]
+                      (accept-batch! (vec batch)))
+                  next-accepted (+ accepted (count ready))
+                  completed? (= :complete (:phase next-security))
+                  evidence
+                  (when completed?
+                    {:presynced (:presynced next-security)
+                     :redownloaded (:redownloaded next-security)
+                     :commitments (count (:commitments next-security))
+                     :commitment-period
+                     (:commitment-period next-security)
+                     :redownload-buffer-size
+                     (:redownload-buffer-size next-security)})
+                  short?
+                  (< header-count protocol/max-headers-per-message)]
+              (when (and short?
+                         (not completed?)
+                         (not (and (= :presync (:phase security-state))
+                                   (= :redownload
+                                      (:phase next-security)))))
+                (headers-sync/require-complete! next-security))
+              (recur
+               (if completed?
+                 [(:hash (last headers))]
+                 (headers-sync/locator next-security))
+               (inc batches)
+               next-accepted
+               (when-not completed? next-security)
+               (or evidence security-evidence)))
+            (do
+              (accept-batch! headers)
+              (let [tip (:hash (last headers))
+                    result
+                    (cond->
+                     {:batches (inc batches)
+                      :accepted (+ accepted header-count)
+                      :locator tip}
+                      security-evidence
+                      (assoc :headers-presync security-evidence))]
+                (if (< header-count protocol/max-headers-per-message)
+                  (assoc result :status :synced)
+                  (recur [tip] (inc batches) (+ accepted header-count)
+                         nil security-evidence)))))))))))
 
 (defn- peer-summary [configuration]
   (let [network (or (:network configuration) :mainnet)]
@@ -499,9 +562,12 @@
   peer resumes from batches already validated and committed by an earlier
   peer. `:required-successes` can be greater than one to compare independently
   reported tips; differing reports are surfaced as `:disagreement?` while the
-  validating callback remains the sole fork-choice authority."
+  validating callback remains the sole fork-choice authority.
+
+  `:presync-fn`, when supplied, is also called after each handshake so every
+  replacement peer receives the latest durable anchor and chainwork."
   [peer-configurations locator-fn accept-batch!
-   {:keys [attempts-per-peer required-successes max-batches]
+   {:keys [attempts-per-peer required-successes max-batches presync-fn]
     :or {attempts-per-peer 1 required-successes 1 max-batches 10000}}]
   (let [peers (vec peer-configurations)]
     (when-not (and (<= 1 (count peers) 32)
@@ -514,7 +580,9 @@
       (fail! :bitcoin.node/peer-set
              "Peer failover requires 1..32 unique configurations with explicit hosts."
              {:count (count peers)}))
-    (when-not (and (ifn? locator-fn) (ifn? accept-batch!))
+    (when-not (and (ifn? locator-fn)
+                   (ifn? accept-batch!)
+                   (or (nil? presync-fn) (ifn? presync-fn)))
       (fail! :bitcoin.node/peer-callback
              "Peer failover requires locator and validation callbacks." {}))
     (when-not (and (integer? attempts-per-peer)
@@ -544,7 +612,9 @@
                       (let [result
                             (sync-headers!
                              connection (locator-fn) accept-batch!
-                             {:max-batches max-batches})
+                             (cond-> {:max-batches max-batches}
+                               presync-fn
+                               (assoc :presync (presync-fn))))
                             tip (:locator result)]
                         {:observation
                          {:peer (peer-summary configuration)

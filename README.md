@@ -116,6 +116,19 @@ mempool, wallet, signing, or mining commands. Retained blocks can be requested
 individually with witness data; the response header must match the requested
 hash before the raw block is returned to the full consensus validator.
 
+Initial public-network header synchronization now uses a Bitcoin Core-style
+two-phase anti-DoS boundary until the network's pinned minimum chainwork is
+reached. The first download performs full PoW, difficulty, linkage, MTP, and
+future-time validation but does not enter SQLite. It retains salted one-bit
+commitments at the Core v31 network-specific periods. A redownload must match
+those commitments, and headers remain behind the network-specific lookahead
+buffer before durable indexing. The maximum commitment count is derived from
+the anchor MTP and the consensus maximum block-production rate, so a peer
+cannot grow temporary state with an impossibly long chain. Short low-work
+chains, commitment overruns, and equivocation fail over with typed evidence.
+`consensus-status` exposes the best-header and minimum chainwork plus
+`:headers-presync-required?` for operator visibility.
+
 ```bash
 clojure -M:test
 clojure -M:lint
