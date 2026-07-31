@@ -87,13 +87,17 @@ blocks and 512 MiB, configurable with `:pending-block-limit` and
 `:pending-byte-limit`. Active-chain undo is independently retained for at
 least 288 blocks by default. The monotonic prune floor does not create Bitcoin
 finality: a deeper valid fork produces an explicit authenticated-history
-reindex plan.
+reindex plan. A definitive activation failure persists its minimal invalid
+root, rejects descendants through ancestry, returns best-header selection to
+the highest-work viable branch, and removes staged invalid bodies in the same
+SQLite transaction.
 Normalized headers are exposed through an immutable lazy map with a bounded
 LRU and write overlay, so normal restart reads only compact host metadata plus
 the active and best tips. A bounded block locator is persisted with that
 metadata and advanced incrementally instead of walking every ancestor before
 each peer request. Databases using normalized host format v1 perform one
-transactional full-index migration; subsequent v2 opens remain bounded.
+transactional full-index migration. Format v2 discovers exact header leaves
+once with disk-backed temporary storage; subsequent v3 opens remain bounded.
 
 `bitcoin.node.disk-utxo` remains available as a lower-level linear-chain host.
 It parses raw blocks, derives consensus Script flags, atomically commits
@@ -132,8 +136,9 @@ buffer before durable indexing. The maximum commitment count is derived from
 the anchor MTP and the consensus maximum block-production rate, so a peer
 cannot grow temporary state with an impossibly long chain. Short low-work
 chains, commitment overruns, and equivocation fail over with typed evidence.
-`consensus-status` exposes the best-header and minimum chainwork plus
-`:headers-presync-required?` for operator visibility.
+`consensus-status` exposes the best-header and minimum chainwork,
+`:headers-presync-required?`, `:invalid-blocks`, and up to 16 recent
+`:invalid-block-roots` for operator visibility.
 
 ```bash
 clojure -M:test

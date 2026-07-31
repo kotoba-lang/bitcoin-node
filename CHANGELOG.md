@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.40.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.34.3 and permanently quarantine definitive
+  invalid block roots plus their descendants.
+- Recover best-header selection to the highest-work viable branch after a
+  staged ancestor fails activation, preventing a high-work invalid branch from
+  pinning synchronization.
+- Atomically persist invalid roots, the recovered block locator, and deletion
+  of every staged invalid descendant; hard-process crash points prove the
+  transition is all-old or all-new.
+- Migrate normalized host metadata to v3 with one-time constant-JVM-memory leaf
+  discovery and expose bounded invalid-root evidence in consensus status.
+
 ## 0.39.0 — 2026-07-31
 
 - Connect the existing pure block scheduler to the real P2P, peer-pool, and

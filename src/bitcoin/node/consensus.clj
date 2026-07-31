@@ -45,6 +45,7 @@
         tip (:active-tip state)
         current (get-in state [:nodes tip])
         best-header (:best-header state)
+        invalid (chainstate/invalid-blocks state)
         background @(:background-state node)]
     {:status :connected
      :backend :embedded-consensus
@@ -53,6 +54,14 @@
      :best-block tip
      :best-header best-header
      :best-header-height (get-in state [:nodes best-header :height])
+     :invalid-blocks (count invalid)
+     :invalid-block-roots
+     (->> invalid
+          (map (fn [[hash details]] (assoc details :hash hash)))
+          (sort-by (juxt :height :hash))
+          reverse
+          (take 16)
+          vec)
      :chainwork (:chainwork current)
      :utxo-count (count (get-in state [:utxo :coins]))
      :fully-validated? (true? (:block-valid? current))
@@ -76,14 +85,34 @@
   (let [parsed (block/parse raw-block)]
     (loop []
       (let [before @(:state node)
-            after (chainstate/accept-block
-                   before parsed now (:verify-script node))]
-        (if (compare-and-set! (:state node) before after)
-          (do
-            (when-let [path (:snapshot-path node)]
-              (storage/save! path after))
-            (consensus-status node))
-          (recur))))))
+            result
+            (try
+              {:after
+               (chainstate/accept-block
+                before parsed now (:verify-script node))}
+              (catch clojure.lang.ExceptionInfo error
+                {:error error}))]
+        (if-let [after (:after result)]
+            (if (compare-and-set! (:state node) before after)
+              (do
+                (when-let [path (:snapshot-path node)]
+                  (storage/save! path after))
+                (consensus-status node))
+              (recur))
+            (let [error (:error result)
+                  failed (:invalid-block-hash (ex-data error))]
+              (if (and (chainstate/invalid-block-error? error)
+                       (get-in before [:nodes failed]))
+                (let [marked
+                      (chainstate/mark-block-invalid
+                       before failed (:type (ex-data error)))]
+                  (if (compare-and-set! (:state node) before marked)
+                    (do
+                      (when-let [path (:snapshot-path node)]
+                        (storage/save! path marked))
+                      (throw error))
+                    (recur)))
+                (throw error))))))))
 
 (defn accept-header!
   "Validate and atomically index one raw 80-byte block header without

@@ -7,8 +7,8 @@
          :git/sha "f3fa15ae68dd3ec33ffb90917a74a0f1dbde8699"}
         io.github.kotoba-lang/bitcoin-consensus
         {:git/url "https://github.com/kotoba-lang/bitcoin-consensus.git"
-         :git/tag "v0.33.0"
-         :git/sha "27d7a2ed51d8f01ba8aa13685059da8959e52916"}
+         :git/tag "v0.34.3"
+         :git/sha "579d728f1978211745fe65e60cce748752d76d7d"}
         io.github.kotoba-lang/sha256d
         {:git/url "https://github.com/kotoba-lang/sha256d.git"
          :git/sha "5fd4e64d0fc5a616b798edbca7327da33c78eb02"}}

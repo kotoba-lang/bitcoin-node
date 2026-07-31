@@ -75,6 +75,19 @@
             (block/parse (vec (concat bytes [1] (:raw tx))))
             (recur (inc nonce))))))))
 
+(defn- mine-block-with-coinbase [parent height tx]
+  (let [candidate (fixture/mine-regtest-block parent height)]
+    (loop [nonce 0]
+      (let [template
+            (assoc (:header candidate)
+                   :merkle-root (:txid-natural tx)
+                   :nonce nonce)
+            bytes (header/encode-block-header template)
+            decoded (header/decode-block-header bytes)]
+        (if (header/hash-meets-target? (:hash decoded) (:bits decoded))
+          (block/parse (vec (concat bytes [1] (:raw tx))))
+          (recur (inc nonce)))))))
+
 (deftest disk-consensus-persists-headers-blocks-and-restarts
   (with-store
     (fn [path]
@@ -142,11 +155,30 @@
             backend (:backend node)
             compact-bytes (sqlite/host-state backend)
             compact (storage/decode-value compact-bytes)]
-        (is (= "bitcoin.node.disk-consensus.normalized.v2"
+        (is (= "bitcoin.node.disk-consensus.normalized.v3"
                (:format compact)))
         (is (nil? (get-in compact [:state :nodes])))
         (is (= 26 (count (sqlite/header-nodes backend))))
         (is (< (alength compact-bytes) 10000))
+        ;; Normalized v2 discovers exact leaves once without materializing the
+        ;; complete header graph, then persists the new quarantine fields.
+        (let [durable (sqlite/status backend)
+              v2
+              (-> compact
+                  (assoc :format
+                         "bitcoin.node.disk-consensus.normalized.v2")
+                  (update :state dissoc :header-tips :invalid-blocks))]
+          (sqlite/save-host-state!
+           backend (:tip durable) (:height durable)
+           (storage/encode-value v2))
+          (let [reopened (disk/open {:path path :network :regtest})
+                migrated
+                (storage/decode-value
+                 (sqlite/host-state (:backend reopened)))]
+            (is (= "bitcoin.node.disk-consensus.normalized.v3"
+                   (:format migrated)))
+            (is (= 1 (count (get-in migrated [:state :header-tips]))))
+            (is (= {} (get-in migrated [:state :invalid-blocks])))))
         ;; The first lazy-index release upgrades normalized v1 metadata once.
         (let [durable (sqlite/status backend)
               v1
@@ -159,7 +191,7 @@
            backend (:tip durable) (:height durable)
            (storage/encode-value v1))
           (let [reopened (disk/open {:path path :network :regtest})]
-            (is (= "bitcoin.node.disk-consensus.normalized.v2"
+            (is (= "bitcoin.node.disk-consensus.normalized.v3"
                    (:format
                     (storage/decode-value
                      (sqlite/host-state (:backend reopened))))))))
@@ -174,7 +206,7 @@
                  (sqlite/host-state (:backend reopened)))]
             (is (= (disk/consensus-status node)
                    (disk/consensus-status reopened)))
-            (is (= "bitcoin.node.disk-consensus.normalized.v2"
+            (is (= "bitcoin.node.disk-consensus.normalized.v3"
                    (:format migrated)))
             (is (= 26
                    (count (sqlite/header-nodes (:backend reopened)))))))))))
@@ -694,6 +726,66 @@
                   (disk/consensus-status
                      (disk/open {:path path
                                  :network :regtest})))))))))))
+
+(deftest invalid-high-work-branch-is-atomically-quarantined
+  (with-store
+    (fn [path]
+      (let [genesis
+            (block/parse (fixture/hex->bytes fixture/regtest-genesis))
+            main-1 (mine-branch-block genesis 1 0)
+            main-2 (mine-branch-block main-1 2 0)
+            invalid-coinbase
+            (transaction/parse
+             (transaction/serialize
+              (assoc-in
+               (coinbase 1 41) [:outputs 0 :value]
+               (inc (utxo/block-subsidy 1 150)))))
+            side-1
+            (mine-block-with-coinbase genesis 1 invalid-coinbase)
+            side-2 (mine-branch-block side-1 2 42)
+            side-3 (mine-branch-block side-2 3 43)
+            failed-hash (get-in side-1 [:header :hash-hex])
+            main-tip (get-in main-2 [:header :hash-hex])
+            node
+            (disk/open {:path path :network :regtest
+                        :genesis-bytes
+                        (fixture/hex->bytes fixture/regtest-genesis)})]
+        (doseq [value [main-1 main-2 side-1 side-2]]
+          (disk/accept-block!
+           node (block/serialize value) 2000000000))
+        (is (= 2 (:pending-blocks (disk/consensus-status node))))
+        (let [error
+              (try
+                (disk/accept-block!
+                 node (block/serialize side-3) 2000000000)
+                (catch clojure.lang.ExceptionInfo value value))
+              status (disk/consensus-status node)]
+          (is (= :bitcoin.consensus/bad-coinbase-amount
+                 (:type (ex-data error))))
+          (is (= failed-hash
+                 (:invalid-block-hash (ex-data error))))
+          (is (= main-tip (:best-header status)))
+          (is (= main-tip (:best-block status)))
+          (is (= 1 (:invalid-blocks status)))
+          (is (= [{:hash failed-hash
+                   :height 1
+                   :reason :bitcoin.consensus/bad-coinbase-amount}]
+                 (:invalid-block-roots status)))
+          (is (= 0 (:pending-blocks status)))
+          (is (= [] (sqlite/pending-block-hashes (:backend node)))))
+        (let [reopened
+              (disk/open {:path path :network :regtest})
+              status (disk/consensus-status reopened)
+              header-error
+              (try
+                (disk/accept-header!
+                 reopened (get-in side-3 [:header :bytes]) 2000000000)
+                (catch clojure.lang.ExceptionInfo value value))]
+          (is (= main-tip (:best-header status)))
+          (is (= 1 (:invalid-blocks status)))
+          (is (empty? (disk/pending-best-chain-blocks reopened)))
+          (is (= :bitcoin.consensus/invalid-ancestor
+                 (:type (ex-data header-error)))))))))
 
 (deftest pending-side-branch-limit-rolls-back-header-and-host-state
   (with-store

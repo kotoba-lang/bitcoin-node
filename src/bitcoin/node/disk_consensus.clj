@@ -100,6 +100,9 @@
   node)
 
 (def ^:private normalized-host-format
+  "bitcoin.node.disk-consensus.normalized.v3")
+
+(def ^:private previous-normalized-host-format
   "bitcoin.node.disk-consensus.normalized.v2")
 
 (def ^:private legacy-normalized-host-format
@@ -160,7 +163,9 @@
         best-hash (:best-header state)
         tip (get-in state [:nodes tip-hash])
         best (get-in state [:nodes best-hash])
-        locator (get state locator-key)]
+        locator (get state locator-key)
+        tips (:header-tips state)
+        invalid (:invalid-blocks state)]
     (when-not (= network (:network state))
       (fail! :bitcoin.consensus/chainstate-network-mismatch
              "Chainstate belongs to a different Bitcoin network."
@@ -175,10 +180,27 @@
                    (vector? locator)
                    (<= 1 (count locator) 64)
                    (every? #(and (vector? %) (= 32 (count %))) locator)
-                   (= (get-in best [:header :hash]) (first locator)))
+                   (= (get-in best [:header :hash]) (first locator))
+                   (set? tips)
+                   (seq tips)
+                   (every? #(and (string? %) (get-in state [:nodes %])) tips)
+                   (map? invalid)
+                   (every?
+                    (fn [[hash {:keys [height reason]}]]
+                      (let [node (get-in state [:nodes hash])]
+                        (and node
+                             (not (true? (:active? node)))
+                             (not (true? (:block-valid? node)))
+                             (= height (:height node))
+                             (keyword? reason))))
+                    invalid)
+                   (nil? (chainstate/invalid-ancestor state tip-hash))
+                   (nil? (chainstate/invalid-ancestor state best-hash)))
       (fail! :bitcoin.consensus/corrupt-chainstate
              "Compact host metadata references invalid normalized headers."
-             {:active-tip tip-hash :best-header best-hash}))
+             {:active-tip tip-hash :best-header best-hash
+              :header-tips (when (set? tips) (count tips))
+              :invalid-blocks (when (map? invalid) (count invalid))}))
     (when (pos? (compare (:chainwork tip) (:chainwork best)))
       (fail! :bitcoin.consensus/corrupt-chainstate
              "Best header has less work than the active tip."
@@ -200,6 +222,24 @@
      (assoc (:state value) :nodes (lazy-nodes backend extras))
      network)))
 
+(defn- migrate-previous-normalized-state!
+  [backend value network durable]
+  (let [extras (:node-data value)]
+    (when-not (map? extras)
+      (fail! :bitcoin.consensus/corrupt-chainstate
+             "Compact host node data is malformed." {}))
+    (let [upgraded
+          (validate-normalized-state!
+           (assoc (:state value)
+                  :header-tips (sqlite/header-tips backend)
+                  :invalid-blocks {}
+                  :nodes (lazy-nodes backend extras))
+           network)]
+      (sqlite/save-host-state!
+       backend (:tip durable) (:height durable)
+       (encode-host-state upgraded))
+      upgraded)))
+
 (defn- decode-legacy-normalized-state
   [backend value network]
   (let [nodes (sqlite/header-nodes backend)
@@ -216,7 +256,7 @@
     (storage/validate!
      (assoc (:state value)
             :nodes merged
-            :format storage/format-version)
+            :format 2)
      network)))
 
 (defn- compact-state [backend state]
@@ -298,6 +338,10 @@
     (cond
       (= normalized-host-format (:format value))
       (decode-normalized-host-state backend value network)
+
+      (= previous-normalized-host-format (:format value))
+      (migrate-previous-normalized-state!
+       backend value network durable)
 
       (= legacy-normalized-host-format (:format value))
       (let [legacy (decode-legacy-normalized-state backend value network)
@@ -610,6 +654,14 @@
         undo (sqlite/undo-status (:backend node))
         tip (:active-tip state)
         best (:best-header state)
+        invalid (chainstate/invalid-blocks state)
+        invalid-roots
+        (->> invalid
+             (map (fn [[hash details]] (assoc details :hash hash)))
+             (sort-by (juxt :height :hash))
+             reverse
+             (take 16)
+             vec)
         best-header-chainwork (get-in state [:nodes best :chainwork])
         minimum-chainwork (get-in state [:consensus :minimum-chainwork])
         assumed? (= :assumed (get-in state [:snapshot :status]))
@@ -631,6 +683,8 @@
      :utxo-count (:coin-count durable)
      :pending-blocks (:pending-blocks pending)
      :pending-bytes (:pending-bytes pending)
+     :invalid-blocks (count invalid)
+     :invalid-block-roots invalid-roots
      :pending-block-limit
      (get-in node [:pending-limits :maximum-count])
      :pending-byte-limit
@@ -1113,49 +1167,75 @@
               view (sqlite/begin backend)]
           (try
             (let [hydrated (assoc-in branch-state [:utxo :coins] view)
-              after
-              (advance-locator
-               before
-               (chainstate/accept-block
-                hydrated parsed now (:verify-script node)
-                {:undo-fn #(sqlite/undo backend %)
-                 :ancestor-node-at-height-fn
-                 (fn [state tip height]
-                   (cached-ancestor-node node state tip height))}))
-              active-changed?
-              (not= (:active-tip before) (:active-tip after))
-              coin-count (utxo/coin-count (get-in after [:utxo :coins]))
-              stripped (strip-node-data after coin-count)]
-          (if active-changed?
-            (let [{:keys [detach attach]}
-                  (transition-paths before after)]
-              (sqlite/commit-transition!
-               (get-in after [:utxo :coins])
-               {:expected-tip (:tip durable-before)
-                :expected-height (:height durable-before)
-                :new-tip (:active-tip after)
-                :new-height (chainstate/active-height after)
-                :detach detach
-                :attach (mapv #(attachment after %) attach)
-                :header-nodes
-                (selected-nodes stripped
-                                (concat [parsed-hash] detach attach))
-                :pending-delete attach
-                :retain-undo-blocks (:undo-retention-blocks node)
-                :host-state-bytes (encode-host-state stripped)}))
-            (do
-              (sqlite/rollback! view)
-              (sqlite/save-host-headers-and-pending!
-               backend (:tip durable-before) (:height durable-before)
-               (encode-host-state stripped)
-               (selected-nodes stripped [parsed-hash])
-               (assoc (pending-options (:pending-limits node))
-                      :store {parsed-hash raw-bytes}))))
+                  after
+                  (advance-locator
+                   before
+                   (chainstate/accept-block
+                    hydrated parsed now (:verify-script node)
+                    {:undo-fn #(sqlite/undo backend %)
+                     :ancestor-node-at-height-fn
+                     (fn [state tip height]
+                       (cached-ancestor-node node state tip height))}))
+                  active-changed?
+                  (not= (:active-tip before) (:active-tip after))
+                  coin-count
+                  (utxo/coin-count (get-in after [:utxo :coins]))
+                  stripped (strip-node-data after coin-count)]
+              (if active-changed?
+                (let [{:keys [detach attach]}
+                      (transition-paths before after)]
+                  (sqlite/commit-transition!
+                   (get-in after [:utxo :coins])
+                   {:expected-tip (:tip durable-before)
+                    :expected-height (:height durable-before)
+                    :new-tip (:active-tip after)
+                    :new-height (chainstate/active-height after)
+                    :detach detach
+                    :attach (mapv #(attachment after %) attach)
+                    :header-nodes
+                    (selected-nodes
+                     stripped (concat [parsed-hash] detach attach))
+                    :pending-delete attach
+                    :retain-undo-blocks (:undo-retention-blocks node)
+                    :host-state-bytes (encode-host-state stripped)}))
+                (do
+                  (sqlite/rollback! view)
+                  (sqlite/save-host-headers-and-pending!
+                   backend (:tip durable-before) (:height durable-before)
+                   (encode-host-state stripped)
+                   (selected-nodes stripped [parsed-hash])
+                   (assoc (pending-options (:pending-limits node))
+                          :store {parsed-hash raw-bytes}))))
               (reset! (:state node) (compact-state backend stripped))
               (consensus-status node))
             (catch Throwable error
               (sqlite/rollback! view)
-              (throw error))))))))
+              (let [{:keys [invalid-block-hash type]} (ex-data error)]
+                (if (and (chainstate/invalid-block-error? error)
+                         (get-in before [:nodes invalid-block-hash]))
+                  (let [marked
+                        (advance-locator
+                         before
+                         (chainstate/mark-block-invalid
+                          before invalid-block-hash type))
+                        pending-delete
+                        (->> (sqlite/pending-block-hashes backend)
+                             (filter
+                              #(chainstate/block-invalid? marked %))
+                             vec)
+                        stripped
+                        (strip-node-data
+                         marked (:coin-count durable-before))]
+                    (sqlite/save-host-headers-and-pending!
+                     backend (:tip durable-before)
+                     (:height durable-before)
+                     (encode-host-state stripped) []
+                     (assoc (pending-options (:pending-limits node))
+                            :delete pending-delete))
+                    (reset! (:state node)
+                            (compact-state backend stripped))
+                    (throw error))
+                  (throw error))))))))))
 
 (defn begin-reindex!
   "Open a non-destructive deep-reorganization rebuild target.
