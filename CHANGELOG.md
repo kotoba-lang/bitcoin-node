@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.19.0 so sequential and atomic batch header
+  synchronization reject obsolete block versions at the exact buried BIP34,
+  BIP66, and BIP65 activation heights.
+
 ## 0.20.0 — 2026-07-31
 
 - Activate AssumeUTXO over a source-backed lazy header map, capture only its

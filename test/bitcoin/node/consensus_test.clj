@@ -36,7 +36,7 @@
 
 (defn mine-regtest-block [parent height]
   (let [coinbase (regtest-coinbase height)
-        template {:version 1
+        template {:version 4
                   :prev-block (get-in parent [:header :hash])
                   :merkle-root (:txid-natural coinbase)
                   :timestamp (inc (get-in parent [:header :timestamp]))
