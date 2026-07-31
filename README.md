@@ -24,6 +24,8 @@ chainstate. It supports headers-first indexing and authenticated Bitcoin Core
 v2 AssumeUTXO activation while retaining a separate fully validated background
 chainstate. A verifier override remains available for differential tests; the
 security boundary documented by `bitcoin-consensus` still applies.
+Transaction decoding uses weight-derived input, output, and witness limits,
+including unknown witness versions reserved for future soft forks.
 
 `bitcoin.node.disk-consensus` is the mainnet-scale embedded host. It validates
 headers and blocks, selects the most-work chain, and atomically commits the

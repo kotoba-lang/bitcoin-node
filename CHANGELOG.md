@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.0 — 2026-07-31
+
+- Upgrade to `bitcoin-consensus` v0.21.0 so unknown witness versions retain
+  consensus-valid, block-weight-bounded witness stacks above 100,000 items.
+- Preserve future soft-fork compatibility by keeping policy limits out of
+  transaction decoding.
+
 ## 0.22.0 — 2026-07-31
 
 - Upgrade to `bitcoin-consensus` v0.20.0 for Core-aligned stripped transaction,
