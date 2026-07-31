@@ -7,8 +7,8 @@
          :git/sha "f3fa15ae68dd3ec33ffb90917a74a0f1dbde8699"}
         io.github.kotoba-lang/bitcoin-consensus
         {:git/url "https://github.com/kotoba-lang/bitcoin-consensus.git"
-         :git/tag "v0.22.0"
-         :git/sha "3a4927bd2afca56ec75cda427af8efafd78b85e7"}}
+         :git/tag "v0.23.0"
+         :git/sha "f20684f7d4340eb9f5c2eacf1e3bcc7b7d5f8b29"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
