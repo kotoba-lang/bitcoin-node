@@ -10,11 +10,13 @@
             [bitcoin.node.peer :as peer]
             [bitcoin.node.wire :as wire]
             [kotobase.bitcoin.protocol :as protocol])
-  (:import [java.nio.file Files Path]
+  (:import [java.nio.charset StandardCharsets]
+           [java.nio.file Files Path StandardOpenOption]
            [java.nio.file.attribute FileAttribute]
            [java.util Random]))
 
 (def schema "kotoba.bitcoin.node-fuzz.v1")
+(def failure-schema "kotoba.bitcoin.node-fuzz-failure.v1")
 (def default-seed 21000000)
 (def default-iterations 5000)
 (def maximum-iterations 1000000)
@@ -48,6 +50,20 @@
   [[0xfd 0xfc 0x00]
    [0xfe 0xff 0xff 0xff 0x7f]
    [0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff 0x7f]])
+
+(defn- bytes->hex [value]
+  (apply str (map #(format "%02x" %) value)))
+
+(defn- hex->bytes [value]
+  (when-not (and (string? value)
+                 (<= (count value) (* 2 maximum-input-bytes))
+                 (even? (count value))
+                 (re-matches #"[0-9a-fA-F]*" value))
+    (throw
+     (ex-info "Fuzz artifact contains invalid input hex."
+              {:type :bitcoin.node.fuzz/artifact-input})))
+  (mapv #(Integer/parseInt (apply str %) 16)
+        (partition 2 value)))
 
 (defn- random-bytes [^Random random maximum]
   (vec (repeatedly (.nextInt random (inc maximum))
@@ -87,8 +103,9 @@
 
 (defn- input-evidence [value]
   {:length (count value)
+   :input-hex (bytes->hex value)
    :prefix-hex
-   (apply str (map #(format "%02x" %) (take 256 value)))})
+   (bytes->hex (take 256 value))})
 
 (defn- exercise!
   [target seed case-index value operation]
@@ -98,7 +115,7 @@
       (when-not (typed-bitcoin-error? error)
         (throw
          (ex-info "Fuzz target returned an untyped Bitcoin failure."
-                  (merge {:type :bitcoin.node/fuzz-untyped-failure
+                  (merge {:type :bitcoin.node.fuzz/untyped-failure
                           :target target :seed seed :case case-index
                           :failure-data (ex-data error)}
                          (input-evidence value))
@@ -106,7 +123,7 @@
     (catch Throwable error
       (throw
        (ex-info "Fuzz target escaped with a host exception."
-                (merge {:type :bitcoin.node/fuzz-host-exception
+                (merge {:type :bitcoin.node.fuzz/host-exception
                         :target target :seed seed :case case-index
                         :host-exception (.getName (class error))}
                        (input-evidence value))
@@ -121,7 +138,7 @@
                    (protocol/encode-message regtest-magic command payload))
         (throw
          (ex-info "Decoded P2P frame did not round-trip canonically."
-                  {:type :bitcoin.node/fuzz-roundtrip}))))))
+                  {:type :bitcoin.node.fuzz/roundtrip}))))))
 
 (defn- version-case! [seed case-index value]
   (exercise! :version seed case-index value
@@ -134,7 +151,7 @@
       (when-not (= value (protocol/encode-headers-payload headers))
         (throw
          (ex-info "Decoded headers payload did not round-trip canonically."
-                  {:type :bitcoin.node/fuzz-roundtrip}))))))
+                  {:type :bitcoin.node.fuzz/roundtrip}))))))
 
 (defn- compact-filter-case! [seed case-index value]
   (exercise! :compact-filter seed case-index value
@@ -187,7 +204,7 @@
 (defn- property! [condition message data]
   (when-not condition
     (throw
-     (ex-info message (assoc data :type :bitcoin.node/fuzz-property)))))
+     (ex-info message (assoc data :type :bitcoin.node.fuzz/property)))))
 
 (defn- assert-durable! [path node seed step]
   (let [status (disk/consensus-status node)
@@ -280,7 +297,7 @@
                  (<= 1 iterations maximum-iterations))
     (throw
      (ex-info "Fuzz seed or iteration count is invalid."
-              {:type :bitcoin.node/fuzz-configuration
+              {:type :bitcoin.node.fuzz/configuration
                :seed seed :iterations iterations})))
   (let [random (Random. (long seed))]
     (dotimes [case-index iterations]
