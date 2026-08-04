@@ -33,4 +33,7 @@
    :main-opts ["-m" "bitcoin.node.core-blockfilter-vectors"]}
   :fuzz
   {:extra-paths ["test"]
-   :main-opts ["-m" "bitcoin.node.fuzz"]}}}
+   :main-opts ["-m" "bitcoin.node.fuzz"]}
+  :crash-test
+  {:extra-paths ["test"]
+   :main-opts ["-m" "bitcoin.node.crash"]}}}
