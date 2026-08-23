@@ -9,6 +9,28 @@ permissions:
   contents: read
 
 jobs:
+  crash-consistency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: DeLaGuardo/setup-clojure@13.1
+        with:
+          cli: latest
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2
+            ~/.gitlibs
+          key: ${{ runner.os }}-crash-clj-${{ hashFiles('deps.edn') }}
+      - name: Hard-stop every durable node transition phase
+        run: timeout 480s clojure -M:crash-test
+
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 5
