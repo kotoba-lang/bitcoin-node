@@ -1,7 +1,7 @@
 (ns bitcoin.node.core-blockfilter-vectors
   (:require [bitcoin.consensus.block :as block]
             [bitcoin.node.compact-filter :as compact]
-            [clojure.data.json :as json]
+            [json.data-json :as json]
             [clojure.java.io :as io]))
 
 (defn- hex->bytes [value]
