@@ -6,7 +6,7 @@
             [bitcoin.node.protocol :as node]
             [chain.observer.contract :as observation]
             [chain.observer.protocol :as chain-observer]
-            [clojure.data.json :as json]
+            [json.data-json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [java.io ByteArrayOutputStream InputStream]

@@ -4,7 +4,7 @@
             [bitcoin.node.protocol :as node]
             [chain.observer.contract :as observation]
             [chain.observer.protocol :as chain-observer]
-            [clojure.data.json :as json]
+            [json.data-json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]])
   (:import [java.io File]
