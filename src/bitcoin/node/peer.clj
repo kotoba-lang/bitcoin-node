@@ -8,7 +8,7 @@
             [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.headers-sync :as headers-sync]
             [bitcoin.node.wire :as wire]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.bitcoin.protocol :as protocol])
   (:import [java.io DataInputStream DataOutputStream EOFException]
            [java.net InetSocketAddress Socket SocketTimeoutException]

@@ -2,7 +2,7 @@
   (:require [bitcoin.node.peer :as peer]
             [bitcoin.node.peer-pool :as pool]
             [bitcoin.consensus.storage :as storage]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]])
   (:import [java.net InetAddress]
            [java.nio.file Files Path]
