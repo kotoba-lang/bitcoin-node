@@ -8,7 +8,7 @@
             [chain.observer.protocol :as chain-observer]
             [json.data-json :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [kotoba.lang.text :as str])
   (:import [java.io ByteArrayOutputStream InputStream]
            [java.net InetAddress URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -112,7 +112,7 @@
 
 (defn- validate-genesis! [configuration actual]
   (when-let [expected (:expected-genesis-hash configuration)]
-    (when-not (= (str/lower-case expected) (str/lower-case actual))
+    (when-not (= (str/lower expected) (str/lower actual))
       (throw
        (ex-info "Bitcoin Core genesis block does not match configuration."
                 {:type :bitcoin.node/genesis-mismatch})))))
@@ -416,7 +416,7 @@
                       exception))))
         _ (when (and (:content-type response)
                      (not (str/includes?
-                           (str/lower-case (:content-type response))
+                           (str/lower (:content-type response))
                            "application/json")))
             (throw
              (ex-info "Bitcoin Core RPC returned an invalid content type."

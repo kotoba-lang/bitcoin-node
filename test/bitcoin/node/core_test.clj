@@ -5,7 +5,7 @@
             [chain.observer.contract :as observation]
             [chain.observer.protocol :as chain-observer]
             [json.data-json :as json]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]])
   (:import [java.io File]
            [java.nio.file Files]

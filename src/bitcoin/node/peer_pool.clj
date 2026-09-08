@@ -7,7 +7,7 @@
   (:require [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.node.peer :as peer]
-            [clojure.string :as str])
+            [kotoba.lang.text :as str])
   (:import [java.net Inet4Address InetAddress]
            [java.nio.charset StandardCharsets]
            [java.nio.channels FileChannel]
@@ -106,7 +106,7 @@
              (every? #(re-matches #"[0-9]{1,3}" %) parts)
              (every? #(<= 0 (parse-long %) 255) parts))
       [:ipv4 (parse-long (nth parts 0)) (parse-long (nth parts 1))]
-      [:host (str/lower-case (or host ""))])))
+      [:host (str/lower (or host ""))])))
 
 (defn create
   "Create a bounded peer pool from explicit or discovered configurations."

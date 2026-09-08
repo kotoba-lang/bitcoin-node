@@ -1,6 +1,6 @@
 (ns bitcoin.node.descriptor
   "Fail-closed policy for Bitcoin Core-canonicalized public descriptors."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def max-descriptor-length 16384)
 
