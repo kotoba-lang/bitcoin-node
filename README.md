@@ -164,10 +164,10 @@ chains, commitment overruns, and equivocation fail over with typed evidence.
 `:invalid-block-roots` for operator visibility.
 
 ```bash
-clojure -M:test
-clojure -M:lint
-clojure -M:coverage
-clojure -M:fuzz 21000000 5000
+kbb -M:test
+kbb -M:lint
+kbb -M:coverage
+kbb -M:fuzz 21000000 5000
 ./scripts/core_blockfilter_vectors.sh
 ```
 
@@ -412,9 +412,9 @@ fetch and validate the relevant blocks separately.
 ## Verify
 
 ```bash
-clojure -M:test
-clojure -M:lint
-clojure -M:coverage
+kbb -M:test
+kbb -M:lint
+kbb -M:coverage
 ```
 
 Snapshot-start historical differential against a synchronized/pruned Core:

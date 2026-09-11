@@ -21,7 +21,7 @@ if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
   exit 1
 fi
 
-result="$(clojure -M:core-blockfilter-vectors "${vector_file}")"
+result="$(kbb -M:core-blockfilter-vectors "${vector_file}")"
 expected="{:vectors 10, :passed 10, :failed 0}"
 if [[ "${result}" != "${expected}" ]]; then
   echo "Bitcoin Core ${core_tag} block-filter coverage changed: ${result}" >&2

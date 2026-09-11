@@ -73,7 +73,7 @@ header_height="$(
   CONSENSUS_NETWORK="$network" \
   CONSENSUS_HEADER_STATE="$header_state" \
   CONSENSUS_GENESIS_HEX="$genesis_hex" \
-  clojure -M -e '
+  kbb -M -e '
     (require (quote bitcoin.consensus.block)
              (quote bitcoin.consensus.chainstate)
              (quote bitcoin.consensus.storage))
@@ -109,7 +109,7 @@ if (( header_height < end_height )); then
   } | CONSENSUS_NETWORK="$network" \
       CONSENSUS_HEADER_STATE="$header_state" \
       CONSENSUS_RESTART_INTERVAL="$restart_interval" \
-      clojure -M -e '
+      kbb -M -e '
     (require (quote bitcoin.consensus.chainstate)
              (quote bitcoin.consensus.storage)
              (quote clojure.string)
@@ -145,7 +145,7 @@ fi
 
 existing_height="$(
   CONSENSUS_NETWORK="$network" CONSENSUS_DATABASE="$database" \
-  clojure -M -e '
+  kbb -M -e '
     (require (quote bitcoin.consensus.sqlite-utxo))
     (let [path (System/getenv "CONSENSUS_DATABASE")
           file (java.nio.file.Path/of path (make-array String 0))]
@@ -186,7 +186,7 @@ fi
     CONSENSUS_DATABASE="$database" \
     CONSENSUS_END_HEIGHT="$end_height" \
     CONSENSUS_RESTART_INTERVAL="$restart_interval" \
-    clojure -M -e '
+    kbb -M -e '
   (require (quote bitcoin.consensus.block)
            (quote bitcoin.consensus.storage)
            (quote bitcoin.node.disk-consensus)
@@ -277,7 +277,7 @@ if [[ "$background_validate" == "true" ]]; then
       CONSENSUS_DATABASE="$database" \
       CONSENSUS_SNAPSHOT_HEIGHT="$snapshot_height" \
       CONSENSUS_RESTART_INTERVAL="$restart_interval" \
-      clojure -M -e '
+      kbb -M -e '
     (require (quote bitcoin.node.disk-consensus)
              (quote clojure.string))
     (let [env #(System/getenv %)
