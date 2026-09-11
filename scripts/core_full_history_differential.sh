@@ -81,7 +81,7 @@ existing="$(
   CONSENSUS_NETWORK="$network" \
   CONSENSUS_DATABASE="$database" \
   CONSENSUS_GENESIS_HEX="$genesis_hex" \
-  clojure -M -e '
+  kbb -M -e '
     (require (quote bitcoin.node.disk-consensus))
     (let [env #(System/getenv %)
           hex (env "CONSENSUS_GENESIS_HEX")
@@ -155,7 +155,7 @@ result="$(
       CONSENSUS_END_HEIGHT="$end_height" \
       CONSENSUS_TARGET_HASH="$target_hash" \
       CONSENSUS_RESTART_INTERVAL="$restart_interval" \
-      clojure -M -e '
+      kbb -M -e '
     (require (quote bitcoin.consensus.block)
              (quote bitcoin.consensus.sqlite-utxo)
              (quote bitcoin.node.disk-consensus)

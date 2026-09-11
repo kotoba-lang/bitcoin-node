@@ -90,7 +90,7 @@ CONSENSUS_NETWORK="$network" \
     CONSENSUS_DATABASE="$database" \
     CONSENSUS_END_HEIGHT="$end_height" \
     CONSENSUS_RESTART_INTERVAL="$restart_interval" \
-    clojure -M -e '
+    kbb -M -e '
   (require (quote bitcoin.consensus.block)
            (quote bitcoin.consensus.sqlite-utxo)
            (quote bitcoin.node.disk-consensus)
