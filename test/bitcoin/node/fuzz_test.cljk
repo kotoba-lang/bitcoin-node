@@ -1,6 +1,6 @@
 (ns bitcoin.node.fuzz-test
   (:require [bitcoin.node.fuzz :as fuzz]
-            [clojure.test :refer [deftest is]]))
+            [kotoba.test :refer [deftest is]]))
 
 (deftest deterministic-wire-and-chainstate-smoke
   (let [result (fuzz/run! 21000000 25)]

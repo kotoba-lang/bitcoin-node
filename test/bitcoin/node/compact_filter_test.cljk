@@ -1,6 +1,6 @@
 (ns bitcoin.node.compact-filter-test
   (:require [bitcoin.node.compact-filter :as compact]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (def block-hash (vec (range 32)))
 

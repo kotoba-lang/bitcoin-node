@@ -2,7 +2,7 @@
   (:require [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.peer :as peer]
             [bitcoin.node.wire :as wire]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kotobase.bitcoin.protocol :as protocol]))
 
 (def regtest-magic (get-in peer/network-configuration [:regtest :magic]))
