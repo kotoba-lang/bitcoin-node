@@ -2,7 +2,7 @@
   "Bitcoin Core JSON-RPC backend with loopback-by-default transport,
   cookie authentication, method allowlisting, response correlation, and
   secret-free errors."
-  (:require [bitcoin.node.descriptor :as descriptor]
+  (:require [kotoba.bytes :as kbytes] [bitcoin.node.descriptor :as descriptor]
             [bitcoin.node.protocol :as node]
             [chain.observer.contract :as observation]
             [chain.observer.protocol :as chain-observer]
@@ -18,7 +18,7 @@
            [java.nio.file.attribute PosixFilePermission]
            [java.time Duration]
            [java.time Instant]
-           [java.util Base64 UUID]))
+           [java.util UUID]))
 
 (def allowed-methods
   #{"getblockchaininfo" "getdescriptorinfo" "deriveaddresses"
@@ -391,10 +391,8 @@
         request-id (str (UUID/randomUUID))
         authorization
         (str "Basic "
-             (.encodeToString
-              (Base64/getEncoder)
-              (.getBytes (str username ":" password)
-                         StandardCharsets/UTF_8)))
+             (kbytes/base64-encode
+              (kbytes/utf8-bytes (str username ":" password))))
         response
         (try
           ((:transport backend)

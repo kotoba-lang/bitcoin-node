@@ -4,12 +4,11 @@
   DNS seeds only bootstrap public IP candidates. Every candidate still passes
   the normal version handshake and all consensus validation; discovery never
   creates a trust anchor."
-  (:require [bitcoin.consensus.codec :as codec]
+  (:require [kotoba.bytes :as kbytes] [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.node.peer :as peer]
             [kotoba.lang.text :as str])
   (:import [java.net Inet4Address InetAddress]
-           [java.nio.charset StandardCharsets]
            [java.nio.channels FileChannel]
            [java.nio.file AtomicMoveNotSupportedException Files LinkOption
             OpenOption Path StandardCopyOption StandardOpenOption]
@@ -242,9 +241,8 @@
              (byte-array
               (map unchecked-byte (:selection-key pool))))
     (.update digest
-             (.getBytes
-              (str ":" (:selection-counter pool) ":" (pr-str id))
-              StandardCharsets/UTF_8))
+             (kbytes/utf8-bytes
+              (str ":" (:selection-counter pool) ":" (pr-str id))))
     (mapv #(bit-and 0xff %) (.digest digest))))
 
 (defn candidates
