@@ -6,7 +6,7 @@
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.node.consensus :as consensus]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header]))
 
 (def genesis

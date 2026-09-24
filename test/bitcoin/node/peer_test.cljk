@@ -4,7 +4,7 @@
             [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.peer :as peer]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as protocol])
   (:import [java.io DataInputStream DataOutputStream]
            [java.net ServerSocket Socket]))

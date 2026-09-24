@@ -1,7 +1,7 @@
 (ns bitcoin.node.disk-utxo-test
   (:require [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.disk-utxo :as disk]
-            [clojure.test :refer [deftest is]])
+            [kotoba.test :refer [deftest is]])
   (:import [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))
 

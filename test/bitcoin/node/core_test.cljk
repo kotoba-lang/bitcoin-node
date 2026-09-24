@@ -6,7 +6,7 @@
             [chain.observer.protocol :as chain-observer]
             [json.data-json :as json]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is]])
+            [kotoba.test :refer [deftest is]])
   (:import [java.io File]
            [java.nio.file Files]
            [java.nio.file.attribute PosixFilePermissions]))

@@ -1,6 +1,6 @@
 (ns bitcoin.node.lazy-header-map-test
   (:require [bitcoin.node.lazy-header-map :as lazy-map]
-            [clojure.test :refer [deftest is]]))
+            [kotoba.test :refer [deftest is]]))
 
 (deftest point-lookups-are-cached-and-overlays-remain-immutable
   (let [durable {"a" {:height 0} "b" {:height 1}}

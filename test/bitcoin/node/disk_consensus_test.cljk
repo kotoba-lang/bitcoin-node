@@ -14,7 +14,7 @@
             [bitcoin.node.lazy-header-map :as lazy-header-map]
             [bitcoin.node.peer :as peer]
             [bitcoin.node.peer-pool :as peer-pool]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header])
   (:import [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))

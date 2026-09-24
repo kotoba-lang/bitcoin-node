@@ -3,7 +3,7 @@
             [bitcoin.node.peer-pool :as pool]
             [bitcoin.consensus.storage :as storage]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]])
+            [kotoba.test :refer [deftest is testing]])
   (:import [java.net InetAddress]
            [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))

@@ -3,7 +3,7 @@
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.headers-sync :as headers-sync]
             [bitcoin.node.peer :as peer]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header]))
 
 (defn- error-type [run!]
