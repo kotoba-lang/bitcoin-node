@@ -1,5 +1,5 @@
 (ns bitcoin.node.headers-sync-test
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.headers-sync :as headers-sync]
             [bitcoin.node.peer :as peer]
@@ -11,7 +11,7 @@
    (ex-data
     (try
       (run!)
-      (catch clojure.lang.ExceptionInfo error error)))))
+      (catch kerror/ExceptionInfo error error)))))
 
 (defn- mine-header [parent marker]
   (loop [nonce 0]

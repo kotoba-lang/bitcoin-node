@@ -1,5 +1,5 @@
 (ns bitcoin.node.lazy-header-map-test
-  (:require [bitcoin.node.lazy-header-map :as lazy-map]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.node.lazy-header-map :as lazy-map]
             [kotoba.test :refer [deftest is]]))
 
 (deftest point-lookups-are-cached-and-overlays-remain-immutable
@@ -78,4 +78,4 @@
           (ex-data
            (try
              (lazy-map/create identity identity {:cache-size 0})
-             (catch clojure.lang.ExceptionInfo error error)))))))
+             (catch kerror/ExceptionInfo error error)))))))

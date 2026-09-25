@@ -1,5 +1,5 @@
 (ns bitcoin.node.wire-test
-  (:require [bitcoin.node.consensus-test :as fixture]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.peer :as peer]
             [bitcoin.node.wire :as wire]
             [kotoba.test :refer [deftest is testing]]
@@ -11,7 +11,7 @@
   (try
     (operation)
     nil
-    (catch clojure.lang.ExceptionInfo error
+    (catch kerror/ExceptionInfo error
       (ex-data error))))
 
 (deftest complete-frames-are-bounded-authenticated-and-canonical

@@ -1,6 +1,6 @@
 (ns bitcoin.node.consensus
   "Thread-safe host adapter for the pure bitcoin-consensus chainstate."
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.storage :as storage]
@@ -90,7 +90,7 @@
               {:after
                (chainstate/accept-block
                 before parsed now (:verify-script node))}
-              (catch clojure.lang.ExceptionInfo error
+              (catch kerror/ExceptionInfo error
                 {:error error}))]
         (if-let [after (:after result)]
             (if (compare-and-set! (:state node) before after)

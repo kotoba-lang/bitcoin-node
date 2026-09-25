@@ -1,5 +1,5 @@
 (ns bitcoin.node.consensus-test
-  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
@@ -197,5 +197,5 @@
              (try
                (consensus/accept-background-block!
                 headers raw-2 2000000000)
-               (catch clojure.lang.ExceptionInfo exception
+               (catch kerror/ExceptionInfo exception
                  exception))))))))

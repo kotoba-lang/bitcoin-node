@@ -1,5 +1,5 @@
 (ns bitcoin.node.disk-consensus-test
-  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
@@ -244,7 +244,7 @@
                    :genesis-bytes
                    (fixture/hex->bytes fixture/regtest-genesis)
                    :undo-retention-blocks 287})
-                 (catch clojure.lang.ExceptionInfo error error))))))
+                 (catch kerror/ExceptionInfo error error))))))
       (let [genesis
             (block/parse (fixture/hex->bytes fixture/regtest-genesis))
             node
@@ -287,7 +287,7 @@
                 (ex-data
                  (try
                    (disk/recovery-plan node -1)
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (is (= 0 (:deleted-undo-blocks (disk/prune-undo! node))))
         (is (= :ok (:undo-integrity (disk/integrity-check! node))))
         (is (= :bitcoin.node/reindex-source-target-alias
@@ -298,7 +298,7 @@
                     node 1
                     {:mode :fully-validated-genesis-replay
                      :target-options {:path path :network :regtest}})
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (let [target-path
               (Path/of (str path ".reindex") (make-array String 0))
               pointer-path
@@ -319,7 +319,7 @@
                    (try
                      (disk/accept-reindex-background-block!
                       session (block/serialize common) 2000000000)
-                     (catch clojure.lang.ExceptionInfo error error))))))
+                     (catch kerror/ExceptionInfo error error))))))
           (disk/accept-reindex-block!
            session (block/serialize common) 2000000000)
           (is (= :bitcoin.node/reindex-fork-not-divergent
@@ -327,7 +327,7 @@
                   (ex-data
                    (try
                      (disk/verify-reindex! session)
-                     (catch clojure.lang.ExceptionInfo error error))))))
+                     (catch kerror/ExceptionInfo error error))))))
           (let [fork-2 (mine-branch-block common 2 1)]
             (disk/accept-reindex-block!
              session (block/serialize fork-2) 2000000000)
@@ -336,7 +336,7 @@
                     (ex-data
                      (try
                        (disk/verify-reindex! session)
-                       (catch clojure.lang.ExceptionInfo error error))))))
+                       (catch kerror/ExceptionInfo error error))))))
             (loop [parent fork-2 height 3]
               (when (<= height 291)
                 (let [next (mine-branch-block parent height 1)]
@@ -382,20 +382,20 @@
                     (ex-data
                      (try
                        (disk/prune-undo! node)
-                       (catch clojure.lang.ExceptionInfo error error))))))
+                       (catch kerror/ExceptionInfo error error))))))
             (is (= :bitcoin.node/reindex-storage-sealed
                    (:type
                     (ex-data
                      (try
                        (disk/prune-undo! (:target session))
-                       (catch clojure.lang.ExceptionInfo error error))))))
+                       (catch kerror/ExceptionInfo error error))))))
             (is (= :bitcoin.node/reindex-storage-sealed
                    (:type
                     (ex-data
                      (try
                        (disk/accept-reindex-block!
                         session [] 2000000000)
-                       (catch clojure.lang.ExceptionInfo error error))))))
+                       (catch kerror/ExceptionInfo error error))))))
             (is (= :verified (:phase (disk/reindex-status session))))
             (Files/write
              pointer-path
@@ -410,7 +410,7 @@
                      (try
                        (disk/load-reindex-pointer
                         pointer-path :regtest)
-                       (catch clojure.lang.ExceptionInfo error error))))))
+                       (catch kerror/ExceptionInfo error error))))))
             (let [damaged (Files/readAllBytes pointer-path)
                   last-index (dec (alength damaged))]
               (aset-byte
@@ -427,7 +427,7 @@
                        (try
                          (disk/load-reindex-pointer
                           pointer-path :regtest)
-                         (catch clojure.lang.ExceptionInfo error error)))))))
+                         (catch kerror/ExceptionInfo error error)))))))
             (is (= 290 (:height (disk/consensus-status node))))))
         (let [reopened (disk/open {:path path :network :regtest})]
           (is (false?
@@ -792,7 +792,7 @@
                   (try
                     (disk/sync-blocks-managed!
                      node (atom ::pool) 2000000000 {:max-blocks 1})
-                    (catch clojure.lang.ExceptionInfo value value))]
+                    (catch kerror/ExceptionInfo value value))]
               (is (= failure-type (:type (ex-data error))))
               (is (= :local
                      (chainstate/block-validation-result error)))
@@ -825,7 +825,7 @@
                   (ex-data
                    (try
                      (disk/active-block-hash-at-height node height)
-                     (catch clojure.lang.ExceptionInfo error error)))))))))))
+                     (catch kerror/ExceptionInfo error error)))))))))))
 
 (deftest managed-sync-bounds-repeated-validation-rejections
   (with-store
@@ -861,7 +861,7 @@
                   (disk/sync-blocks-managed!
                    node (atom ::pool) 2000000000
                    {:max-blocks 1 :max-validation-retries 1})
-                  (catch clojure.lang.ExceptionInfo value value))]
+                  (catch kerror/ExceptionInfo value value))]
             (is (= :bitcoin.node/block-validation-retry-limit
                    (:type (ex-data error))))
             (is (= 2 @attempts))
@@ -885,7 +885,7 @@
                 (ex-data
                  (try
                    (block/parse (:raw invalid))
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (disk/accept-headers!
          node [(get-in invalid [:header :bytes])] 2000000000)
         (with-redefs
@@ -988,7 +988,7 @@
               (try
                 (disk/accept-block!
                  node (block/serialize side-3) 2000000000)
-                (catch clojure.lang.ExceptionInfo value value))
+                (catch kerror/ExceptionInfo value value))
               status (disk/consensus-status node)]
           (is (= :bitcoin.consensus/bad-coinbase-amount
                  (:type (ex-data error))))
@@ -1010,7 +1010,7 @@
               (try
                 (disk/accept-header!
                  reopened (get-in side-3 [:header :bytes]) 2000000000)
-                (catch clojure.lang.ExceptionInfo value value))]
+                (catch kerror/ExceptionInfo value value))]
           (is (= main-tip (:best-header status)))
           (is (= 1 (:invalid-blocks status)))
           (is (empty? (disk/pending-best-chain-blocks reopened)))
@@ -1037,7 +1037,7 @@
             (try
               (disk/accept-block!
                node (block/serialize side-1) 2000000000)
-              (catch clojure.lang.ExceptionInfo value value))]
+              (catch kerror/ExceptionInfo value value))]
         (is (= :bitcoin.consensus/pending-block-limit
                (:type (ex-data error))))
         (is (= before (disk/consensus-status node)))
@@ -1059,7 +1059,7 @@
                 (ex-data
                  (try
                    (disk/open {:path path :network :regtest})
-                   (catch clojure.lang.ExceptionInfo error error))))))))))
+                   (catch kerror/ExceptionInfo error error))))))))))
 
 (deftest assumeutxo-start-is-atomic-unready-and-restart-safe
   (with-store
@@ -1129,7 +1129,7 @@
                 (ex-data
                  (try
                    (disk/verify-background! node)
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (is (= 3
                (:height
                 (disk/accept-block!
@@ -1157,7 +1157,7 @@
                      (try
                        (disk/accept-background-block!
                         resumed (block/serialize block-2) 2000000000)
-                       (catch clojure.lang.ExceptionInfo error error))))))
+                       (catch kerror/ExceptionInfo error error))))))
             (is (= :validated
                    (:snapshot-status
                     (disk/consensus-status
@@ -1199,7 +1199,7 @@
                    (try
                      (disk/accept-background-block!
                       node (block/serialize block-1) 2000000000)
-                     (catch clojure.lang.ExceptionInfo error error)))))))
+                     (catch kerror/ExceptionInfo error error)))))))
         (is (= :assumed
                (:snapshot-status (disk/consensus-status node))))
         (is (= 1 (:background-height

@@ -1,5 +1,5 @@
 (ns bitcoin.node.disk-utxo-test
-  (:require [bitcoin.node.consensus-test :as fixture]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.node.consensus-test :as fixture]
             [bitcoin.node.disk-utxo :as disk]
             [kotoba.test :refer [deftest is]])
   (:import [java.nio.file Files Path]
@@ -41,4 +41,4 @@
           (ex-data
            (try
              (disk/open {:path "unused.sqlite" :network :unknown})
-             (catch clojure.lang.ExceptionInfo error error)))))))
+             (catch kerror/ExceptionInfo error error)))))))

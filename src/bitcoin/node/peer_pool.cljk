@@ -4,7 +4,7 @@
   DNS seeds only bootstrap public IP candidates. Every candidate still passes
   the normal version handshake and all consensus validation; discovery never
   creates a trust anchor."
-  (:require [kotoba.bytes :as kbytes] [bitcoin.consensus.codec :as codec]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.node.peer :as peer]
             [kotoba.lang.text :as str])
@@ -540,7 +540,7 @@
           (swap! pool-atom record-failure
                  peer now-ms type elapsed-ms))
         (assoc result :pool (status @pool-atom now-ms)))
-      (catch clojure.lang.ExceptionInfo error
+      (catch kerror/ExceptionInfo error
         (doseq [{:keys [peer type elapsed-ms]} (:failures (ex-data error))]
           (swap! pool-atom record-failure
                  peer now-ms type elapsed-ms))
@@ -578,7 +578,7 @@
           (swap! pool-atom record-failure
                  peer now-ms type elapsed-ms))
         (assoc result :pool (status @pool-atom now-ms)))
-      (catch clojure.lang.ExceptionInfo error
+      (catch kerror/ExceptionInfo error
         (doseq [{:keys [peer type elapsed-ms]} (:failures (ex-data error))]
           (swap! pool-atom record-failure
                  peer now-ms type elapsed-ms))

@@ -5,7 +5,7 @@
   This namespace adds resource bounds, canonical CompactSize checks, strict
   frame consumption, valid command bytes, and one typed failure vocabulary so
   malformed peers cannot leak JVM assertion/index/UTF decoding failures."
-  (:require [bitcoin.consensus.codec :as codec]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.codec :as codec]
             [kotobase.bitcoin.protocol :as protocol]))
 
 (def maximum-user-agent-bytes 256)
@@ -20,7 +20,7 @@
   [type message operation]
   (try
     (operation)
-    (catch clojure.lang.ExceptionInfo error
+    (catch kerror/ExceptionInfo error
       (if (node-error? error)
         (throw error)
         (throw

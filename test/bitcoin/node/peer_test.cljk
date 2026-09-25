@@ -1,5 +1,5 @@
 (ns bitcoin.node.peer-test
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.node.compact-filter :as compact-filter]
             [bitcoin.node.consensus-test :as fixture]
@@ -50,7 +50,7 @@
               (peer/connect!
                {:host "127.0.0.1" :port (.getLocalPort server)
                 :network :regtest :timeout-ms 5000})
-              (catch clojure.lang.ExceptionInfo error error))))]
+              (catch kerror/ExceptionInfo error error))))]
       @served
       type)))
 
@@ -186,7 +186,7 @@
                    (peer/get-basic-filter-headers!
                     (assoc connection :peer-version {:services 0})
                     10 10 block-hash previous-header)
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (finally
           (peer/close! connection)))
       @served)))
@@ -214,7 +214,7 @@
                  (peer/connect!
                   {:host "127.0.0.1" :port (.getLocalPort server)
                    :network :regtest :timeout-ms 5000})
-                 (catch clojure.lang.ExceptionInfo error error))))))
+                 (catch kerror/ExceptionInfo error error))))))
       @served)))
 
 (deftest peer-must-advertise-required-service-bits
@@ -244,7 +244,7 @@
                         :network :regtest
                         :timeout-ms 5000
                         :required-services required-services})
-                      (catch clojure.lang.ExceptionInfo error error))]
+                      (catch kerror/ExceptionInfo error error))]
                 @served
                 result)))]
     (let [failure (connect-to 0 peer/node-network-service)]
@@ -295,7 +295,7 @@
               (try
                 (peer/get-headers!
                  connection [(vec (repeat 32 0))])
-                (catch clojure.lang.ExceptionInfo error error))
+                (catch kerror/ExceptionInfo error error))
               elapsed-ms (/ (- (System/nanoTime) started) 1e6)]
           (is (= :bitcoin.node/peer-timeout
                  (:type (ex-data failure))))
@@ -337,19 +337,19 @@
           (ex-data
            (try
              (peer/connect! {:network :unknown})
-             (catch clojure.lang.ExceptionInfo error error))))))
+             (catch kerror/ExceptionInfo error error))))))
   (is (= :bitcoin.node/peer-locator
          (:type
           (ex-data
            (try
              (peer/get-headers! {} [])
-             (catch clojure.lang.ExceptionInfo error error))))))
+             (catch kerror/ExceptionInfo error error))))))
   (is (= :bitcoin.node/peer-block-hash
          (:type
           (ex-data
            (try
              (peer/get-block! {} [])
-             (catch clojure.lang.ExceptionInfo error error)))))))
+             (catch kerror/ExceptionInfo error error)))))))
 
 (deftest bounded-peer-set-fails-over-and-resumes-from-current-locator
   (let [locators (atom [])
@@ -422,7 +422,7 @@
             [{:host "a"} {:host "b"}]
             (constantly [(vec (repeat 32 0))])
             (constantly nil) {})
-           (catch clojure.lang.ExceptionInfo error error))]
+           (catch kerror/ExceptionInfo error error))]
      (is (= :bitcoin.node/peer-set-exhausted
             (:type (ex-data failure))))
      (is (= 2 (count (:failures (ex-data failure))))))))
@@ -519,7 +519,7 @@
             (ex-data
              (try
                (block/parse bad-merkle-body)
-               (catch clojure.lang.ExceptionInfo error error))))))
+               (catch kerror/ExceptionInfo error error))))))
     (with-redefs
      [peer/connect!
       (fn [_] {:peer-version {:services 1}})
@@ -574,7 +574,7 @@
              (peer/download-blocks-from-peers!
               [{:host "peer-a"} {:host "peer-b"}]
               [hash] {:parallel-peers 2})
-             (catch clojure.lang.ExceptionInfo error error))]
+             (catch kerror/ExceptionInfo error error))]
        (is (= :bitcoin.node/block-peer-set-exhausted
               (:type (ex-data failure))))
        (is (= 2 (count (:failures (ex-data failure))))
@@ -599,7 +599,7 @@
              (peer/download-blocks-from-peers!
               [{:host "slow"}] [hash]
               {:batch-timeout-ms 1000})
-             (catch clojure.lang.ExceptionInfo error error))
+             (catch kerror/ExceptionInfo error error))
            elapsed-ms (/ (- (System/nanoTime) started) 1e6)]
        (is (= :bitcoin.node/block-peer-set-exhausted
               (:type (ex-data failure))))
@@ -666,7 +666,7 @@
            (peer/get-basic-filter-headers-from-peers!
             [{:host "peer-a"} {:host "peer-b"}]
             10 10 (vec (repeat 32 4)) (vec (repeat 32 0)) {})
-           (catch clojure.lang.ExceptionInfo error error))]
+           (catch kerror/ExceptionInfo error error))]
      (is (= :bitcoin.node/compact-filter-quorum
             (:type (ex-data failure))))
      (is (= 2 (:successful-peers (ex-data failure))))

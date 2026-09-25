@@ -1,5 +1,5 @@
 (ns bitcoin.node.peer-pool-test
-  (:require [bitcoin.node.peer :as peer]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.node.peer :as peer]
             [bitcoin.node.peer-pool :as pool]
             [bitcoin.consensus.storage :as storage]
             [kotoba.lang.text :as str]
@@ -45,7 +45,7 @@
            (try
              (pool/discover-dns!
               :mainnet {:seeds (repeat 17 "seed")})
-             (catch clojure.lang.ExceptionInfo error error)))))))
+             (catch kerror/ExceptionInfo error error)))))))
 
 (deftest pool-rotates-healthy-peers-and-cools-down-failures
   (let [initial
@@ -168,7 +168,7 @@
               [{:host "8.8.8.8" :network :mainnet
                 :required-services
                 (inc peer/maximum-service-mask)}])
-             (catch clojure.lang.ExceptionInfo error error)))))))
+             (catch kerror/ExceptionInfo error error)))))))
 
 (deftest peer-pool-snapshot-is-checksummed-bounded-and-atomic
   (let [directory
@@ -194,13 +194,13 @@
                 (ex-data
                  (try
                    (pool/decode damaged)
-                   (catch clojure.lang.ExceptionInfo error error)))))))
+                   (catch kerror/ExceptionInfo error error)))))))
       (is (= :bitcoin.node/peer-pool-corrupt
              (:type
               (ex-data
                (try
                  (pool/validate {:peers {[:mainnet "bad" 8333] {}}})
-                 (catch clojure.lang.ExceptionInfo error error))))))
+                 (catch kerror/ExceptionInfo error error))))))
       (finally
         (Files/deleteIfExists path)
         (Files/deleteIfExists directory)))))
@@ -271,7 +271,7 @@
                   (pool/sync-headers!
                    pool-atom (constantly []) (constantly nil)
                    {:now-ms 100})
-                  (catch clojure.lang.ExceptionInfo error error))))))
+                  (catch kerror/ExceptionInfo error error))))))
        (is (= 1 (get-in @pool-atom
                         [:peers (pool/peer-id configuration)
                          :failures])))))))

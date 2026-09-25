@@ -1,5 +1,5 @@
 (ns bitcoin.node.compact-filter-test
-  (:require [bitcoin.node.compact-filter :as compact]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.node.compact-filter :as compact]
             [kotoba.test :refer [deftest is testing]]))
 
 (def block-hash (vec (range 32)))
@@ -9,7 +9,7 @@
    (ex-data
     (try
       (thunk)
-      (catch clojure.lang.ExceptionInfo error error)))))
+      (catch kerror/ExceptionInfo error error)))))
 
 (deftest basic-filter-round-trip-and-membership
   (let [included [[1 2 3] [4 5] [1 2 3]]
