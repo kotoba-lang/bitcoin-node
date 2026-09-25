@@ -5,7 +5,7 @@
   journals share one commit boundary. Block bodies never enter the host
   metadata blob. Validated side-branch bodies use bounded raw SQLite staging
   until activation, when they are consumed by the same UTXO transaction."
-  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
@@ -999,7 +999,7 @@
   [node pool-atom source raw now options]
   (try
     (accept-block! node raw now)
-    (catch clojure.lang.ExceptionInfo error
+    (catch kerror/ExceptionInfo error
       (let [feedback-type
             (cond
               (or (chainstate/invalid-block-error? error)
@@ -1047,7 +1047,7 @@
               (accept-managed-block!
                node pool-atom source raw now options)
               {:accepted? true}
-              (catch clojure.lang.ExceptionInfo error
+              (catch kerror/ExceptionInfo error
                 {:error error}))]
         (if-let [error (:error attempt)]
           (if (:peer-feedback (ex-data error))
@@ -1103,7 +1103,7 @@
                  (peer-pool/download-blocks!
                   pool-atom hashes
                   (dissoc options :max-blocks :max-validation-retries))
-                 (catch clojure.lang.ExceptionInfo error
+                 (catch kerror/ExceptionInfo error
                    (if (seq validation-failures)
                      (throw
                       (ex-info
@@ -1303,7 +1303,7 @@
           parsed
           (try
             (block/parse raw-vector)
-            (catch clojure.lang.ExceptionInfo error
+            (catch kerror/ExceptionInfo error
               (let [annotated
                     (chainstate/annotate-block-validation-error
                      parsed-hash error)]

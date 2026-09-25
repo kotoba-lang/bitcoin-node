@@ -1,5 +1,5 @@
 (ns bitcoin.node.core-test
-  (:require [bitcoin.node.core :as core]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.node.core :as core]
             [bitcoin.node.descriptor :as descriptor]
             [bitcoin.node.protocol :as node]
             [chain.observer.contract :as observation]
@@ -35,7 +35,7 @@
 (deftest endpoint-is-loopback-by-default
   (is (= "127.0.0.1" (.getHost (core/endpoint config))))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"not allowed"
+       kerror/ExceptionInfo #"not allowed"
        (core/endpoint (assoc config :url "http://example.com:8332"))))
   (is (= "example.com"
          (.getHost
@@ -43,7 +43,7 @@
            (assoc config :url "https://example.com:8332"
                   :allow-remote? true)))))
   (is (thrown?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        (core/endpoint
         (assoc config :url "http://user:secret@127.0.0.1:8332"))))
   (is (= :bitcoin.node/invalid-endpoint
@@ -51,7 +51,7 @@
           (ex-data
            (try
              (core/endpoint (assoc config :url "://bad"))
-             (catch clojure.lang.ExceptionInfo exception
+             (catch kerror/ExceptionInfo exception
                exception)))))))
 
 (deftest cookie-authentication-rejects-broad-posix-permissions
@@ -66,7 +66,7 @@
                 (ex-data
                  (try
                    (core/credential {:cookie-file (.getPath cookie)})
-                   (catch clojure.lang.ExceptionInfo exception
+                   (catch kerror/ExceptionInfo exception
                      exception))))))
         (Files/setPosixFilePermissions
          (.toPath cookie) (PosixFilePermissions/fromString "rw-------"))
@@ -89,13 +89,13 @@
                :hasprivatekeys false}]
     (is (= :taproot-multisig (:kind (descriptor/validate-info valid))))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"Private"
+         kerror/ExceptionInfo #"Private"
          (descriptor/validate-info (assoc valid :hasprivatekeys true))))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"not solvable"
+         kerror/ExceptionInfo #"not solvable"
          (descriptor/validate-info (assoc valid :issolvable false))))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"Only Taproot"
+         kerror/ExceptionInfo #"Only Taproot"
          (descriptor/validate-info
           (assoc valid :descriptor "wpkh(xpub/0/*)#02345678"))))))
 
@@ -126,7 +126,7 @@
       (is (true? (:success? scan)))
       (is (= 1 (count (:unspents scan)))))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"denied"
+         kerror/ExceptionInfo #"denied"
          (core/rpc! (core/backend config (transport {}))
                     "sendtoaddress" [])))))
 
@@ -136,15 +136,15 @@
                          :source :test})]
     (let [backend (core/backend config (transport []))]
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"range is invalid"
+           kerror/ExceptionInfo #"range is invalid"
            (node/derive-addresses
             backend "tr(xpub-placeholder)#02345678" [100 1])))
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"range is invalid"
+           kerror/ExceptionInfo #"range is invalid"
            (node/derive-addresses
             backend "tr(xpub-placeholder)#02345678" [0 1000])))
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"scan request is invalid"
+           kerror/ExceptionInfo #"scan request is invalid"
            (node/scan-descriptors backend []))))))
 
 (deftest rpc-rejects-uncorrelated-and-invalid-responses
@@ -164,13 +164,13 @@
              (:type (ex-data
                      (try
                        (core/rpc! wrong-id "getblockchaininfo" [])
-                       (catch clojure.lang.ExceptionInfo exception
+                       (catch kerror/ExceptionInfo exception
                          exception))))))
       (is (= :bitcoin.node/invalid-response
              (:type (ex-data
                      (try
                        (core/rpc! invalid-json "getblockchaininfo" [])
-                       (catch clojure.lang.ExceptionInfo exception
+                       (catch kerror/ExceptionInfo exception
                          exception)))))))))
 
 (deftest identity-is-bound-to-chain-and-genesis
@@ -201,7 +201,7 @@
                   (core/backend
                    (assoc config :expected-chain :regtest)
                    (routed-transport results)))
-                 (catch clojure.lang.ExceptionInfo exception
+                 (catch kerror/ExceptionInfo exception
                    exception))))))
       (is (= :bitcoin.node/genesis-mismatch
              (:type
@@ -212,7 +212,7 @@
                    (assoc config :expected-chain :main
                           :expected-genesis-hash (apply str (repeat 64 "0")))
                    (routed-transport results)))
-                 (catch clojure.lang.ExceptionInfo exception
+                 (catch kerror/ExceptionInfo exception
                    exception)))))))))
 
 (deftest capabilities-are-discovered-not-assumed
@@ -306,7 +306,7 @@
                (try
                  (node/scan-descriptors
                   backend ["tr(xpub-placeholder)#02345678"])
-                 (catch clojure.lang.ExceptionInfo exception
+                 (catch kerror/ExceptionInfo exception
                    exception))))))
       (deliver release true)
       (is (true? (:success? @first-scan)))
@@ -329,7 +329,7 @@
                  (core/scan-blocks
                   backend ["tr(xpub-placeholder)#02345678"]
                   {:start-height 0})
-                 (catch clojure.lang.ExceptionInfo exception
+                 (catch kerror/ExceptionInfo exception
                    exception)))))))))
 
 (deftest history-scan-runs-only-with-a-synced-index
@@ -392,7 +392,7 @@
               (ex-data
                (try
                  (core/rpc! backend "getblockchaininfo" [])
-                 (catch clojure.lang.ExceptionInfo exception
+                 (catch kerror/ExceptionInfo exception
                    exception)))))))))
 
 (deftest rpc-wraps-transport-failures-without-secret-data
@@ -406,7 +406,7 @@
           exception
           (try
             (core/rpc! backend "getblockchaininfo" [])
-            (catch clojure.lang.ExceptionInfo caught
+            (catch kerror/ExceptionInfo caught
               caught))]
       (is (= :bitcoin.node/transport-failed
              (:type (ex-data exception))))

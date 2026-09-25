@@ -1,7 +1,7 @@
 (ns bitcoin.node.fuzz
   "Deterministic fuzzing for untrusted P2P input and durable chainstate."
   (:refer-clojure :exclude [run!])
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.node.compact-filter :as compact-filter]
@@ -111,7 +111,7 @@
   [target seed case-index value operation]
   (try
     (operation)
-    (catch clojure.lang.ExceptionInfo error
+    (catch kerror/ExceptionInfo error
       (when-not (typed-bitcoin-error? error)
         (throw
          (ex-info "Fuzz target returned an untyped Bitcoin failure."
@@ -267,7 +267,7 @@
                   (try
                     (disk/accept-block! node invalid-raw 2000000000)
                     nil
-                    (catch clojure.lang.ExceptionInfo error error))]
+                    (catch kerror/ExceptionInfo error error))]
               (property! (= side-length (:height status))
                          "Most-work side branch did not become active."
                          {:seed seed :status status})

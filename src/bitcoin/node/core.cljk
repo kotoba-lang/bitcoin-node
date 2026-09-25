@@ -2,7 +2,7 @@
   "Bitcoin Core JSON-RPC backend with loopback-by-default transport,
   cookie authentication, method allowlisting, response correlation, and
   secret-free errors."
-  (:require [kotoba.bytes :as kbytes] [bitcoin.node.descriptor :as descriptor]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [bitcoin.node.descriptor :as descriptor]
             [bitcoin.node.protocol :as node]
             [chain.observer.contract :as observation]
             [chain.observer.protocol :as chain-observer]
@@ -93,7 +93,7 @@
         (throw (ex-info "Bitcoin Core RPC endpoint is not allowed."
                         {:type :bitcoin.node/invalid-endpoint})))
       uri)
-    (catch clojure.lang.ExceptionInfo exception
+    (catch kerror/ExceptionInfo exception
       (throw exception))
     (catch Exception _
       (throw (ex-info "Bitcoin Core RPC endpoint is invalid."
@@ -400,7 +400,7 @@
             :authorization authorization
             :request {:jsonrpc "2.0" :id request-id
                       :method method :params params}})
-          (catch clojure.lang.ExceptionInfo exception
+          (catch kerror/ExceptionInfo exception
             (if (some-> exception ex-data :type)
               (throw exception)
               (throw
